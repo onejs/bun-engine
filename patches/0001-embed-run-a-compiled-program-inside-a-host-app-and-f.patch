@@ -5,14 +5,39 @@ Subject: [PATCH] embed: run a compiled program inside a host app, and find one
  in __TEXT,__bun of a loaded image
 
 ---
- src/jsc/bindings/c-bindings.cpp | 20 +++++++
- src/runtime/bin_entry/embed.rs  | 96 +++++++++++++++++++++++++++++++++
- src/runtime/bin_entry/mod.rs    |  1 +
- src/runtime/cli/mod.rs          | 45 +++++++++++++++-
- src/runtime/cli/run_command.rs  | 25 ++++++---
- 5 files changed, 178 insertions(+), 9 deletions(-)
- create mode 100644 src/runtime/bin_entry/embed.rs
+ src/jsc/bindings/bindings.cpp   |  14 +++++
+ src/jsc/bindings/c-bindings.cpp |  20 +++++++
+ src/runtime/bin_entry/embed.rs  | 129 ++++++++++++++++++++++++++++++++++++++++
+ src/runtime/bin_entry/mod.rs    |   1 +
+ src/runtime/cli/mod.rs          |  45 +++++++++++++-
+ src/runtime/cli/run_command.rs  |  25 +++++---
+ 6 files changed, 225 insertions(+), 9 deletions(-)
 
+diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
+index 66e50f4ba8..88c660c095 100644
+--- a/src/jsc/bindings/bindings.cpp
++++ b/src/jsc/bindings/bindings.cpp
+@@ -5692,6 +5692,20 @@ extern "C" void JSC__VM__getAPILock(JSC::VM* vm)
+     vm->apiLock().lock();
+ }
+ 
++// held by an embedding host while it is not ticking, so the API lock's release
++// at the end of a C API call never drains microtasks behind the host's back
++static JSC::VM::DrainMicrotaskDelayScope* embedMicrotaskDelay;
++
++extern "C" void BunEmbed__delayMicrotasks(JSC::VM* vm)
++{
++    embedMicrotaskDelay = new JSC::VM::DrainMicrotaskDelayScope(*vm);
++}
++
++extern "C" void BunEmbed__undelayMicrotasks()
++{
++    delete std::exchange(embedMicrotaskDelay, nullptr);
++}
++
+ extern "C" void JSC__VM__releaseAPILock(JSC::VM* vm)
+ {
+     // https://github.com/WebKit/WebKit/blob/6cb5017d237ef7cb898582a22f05acca22322845/Source/JavaScriptCore/runtime/JSLock.cpp#L72
 diff --git a/src/jsc/bindings/c-bindings.cpp b/src/jsc/bindings/c-bindings.cpp
 index f9a6ec7019..51b58d362a 100644
 --- a/src/jsc/bindings/c-bindings.cpp
@@ -53,15 +78,19 @@ index f9a6ec7019..51b58d362a 100644
      uint8_t* sectionData = getsectiondata(&_mh_execute_header, "__BUN", "__bun", &sectionSize);
 diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
 new file mode 100644
-index 0000000000..f4be364d41
+index 0000000000..366f290a59
 --- /dev/null
 +++ b/src/runtime/bin_entry/embed.rs
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,129 @@
 +//! Entry points for a host that owns the thread, such as a React Native engine.
 +//! The host calls `bun_embed_create` on its JS thread, installs its own globals
 +//! on the returned `JSGlobalContextRef`, runs the program with
 +//! `bun_embed_run_entry`, and calls `bun_embed_tick` where it drains microtasks.
-+//! Every call after `bun_embed_create` must come from that same thread.
++//! Every call after `bun_embed_create` must come from that same thread, except
++//! `bun_embed_tick`. The host may run JavaScript on another thread while the JS
++//! thread waits for it (React Native does for synchronous events), so the API
++//! lock is held only while JavaScript runs, as JSC's C API takes it, and a held
++//! microtask delay keeps the lock's release from draining microtasks.
 +
 +use core::ffi::{c_char, c_int, c_void};
 +
@@ -70,6 +99,27 @@ index 0000000000..f4be364d41
 +
 +static EMBEDDED: bun_core::RacyCell<Option<(&'static VirtualMachine, &'static [u8])>> =
 +    bun_core::RacyCell::new(None);
++static JS_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
++
++unsafe extern "C" {
++    fn BunEmbed__delayMicrotasks(vm: *mut c_void);
++    fn BunEmbed__undelayMicrotasks();
++}
++
++fn jsc_vm(vm: &VirtualMachine) -> *mut c_void {
++    std::ptr::from_ref(vm.global().vm()).cast_mut().cast()
++}
++
++/// Drains microtasks, and on the JS thread runs bun's ready tasks too.
++fn tick(vm: &VirtualMachine) {
++    let _lock = vm.global().vm().get_api_lock();
++    // ending the delay drains JSC's queue
++    unsafe { BunEmbed__undelayMicrotasks() };
++    if JS_THREAD.get() == Some(&std::thread::current().id()) {
++        vm.tick();
++    }
++    unsafe { BunEmbed__delayMicrotasks(jsc_vm(vm)) };
++}
 +
 +fn embedded() -> (&'static VirtualMachine, &'static [u8]) {
 +    // SAFETY: written once by `bun_embed_create` on the JS thread, read only there.
@@ -101,9 +151,11 @@ index 0000000000..f4be364d41
 +        bun_core::output::flush();
 +        return core::ptr::null_mut();
 +    };
-+    // Held for the life of the thread, as `Run::start` holds it, so JSC never
-+    // drains microtasks behind the host's back.
-+    core::mem::forget(vm.global().vm().get_api_lock());
++    {
++        let _lock = vm.global().vm().get_api_lock();
++        unsafe { BunEmbed__delayMicrotasks(jsc_vm(vm)) };
++    }
++    let _ = JS_THREAD.set(std::thread::current().id());
 +    // SAFETY: first and only write, on the JS thread.
 +    unsafe { *EMBEDDED.get() = Some((vm, entry)) };
 +    // A `JSGlobalContextRef` is the `JSGlobalObject` pointer (JSC's APICast.h).
@@ -119,6 +171,9 @@ index 0000000000..f4be364d41
 +#[unsafe(no_mangle)]
 +pub(crate) unsafe extern "C" fn bun_embed_run_entry(exception: *mut *const c_void) -> c_int {
 +    let (vm, entry) = embedded();
++    let lock = vm.global().vm().get_api_lock();
++    // loading waits for the entry's promise, which takes microtasks
++    unsafe { BunEmbed__undelayMicrotasks() };
 +    let status = match vm.load_entry_point(Some(entry)) {
 +        Ok(promise) => {
 +            // SAFETY: a live GC cell returned by the module loader.
@@ -141,17 +196,20 @@ index 0000000000..f4be364d41
 +            2
 +        }
 +    };
++    unsafe { BunEmbed__delayMicrotasks(jsc_vm(vm)) };
++    drop(lock);
 +    bun_core::output::flush();
 +    status
 +}
 +
-+/// Runs ready tasks and drains microtasks without blocking.
++/// Drains microtasks without blocking, and on the JS thread runs ready tasks.
 +///
 +/// # Safety
-+/// After a successful `bun_embed_create`, on its thread.
++/// After a successful `bun_embed_create`, on its thread or on one the JS thread
++/// waits for.
 +#[unsafe(no_mangle)]
 +pub(crate) unsafe extern "C" fn bun_embed_tick() {
-+    embedded().0.tick();
++    tick(embedded().0);
 +}
 diff --git a/src/runtime/bin_entry/mod.rs b/src/runtime/bin_entry/mod.rs
 index 122d02780a..4001042007 100644
@@ -279,5 +337,4 @@ index bc9401910c..9e4c87f8b3 100644
  }
  
 -- 
-2.53.0
-
+2.43.0
