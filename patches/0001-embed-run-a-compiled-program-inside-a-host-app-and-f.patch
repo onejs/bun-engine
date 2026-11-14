@@ -1,0 +1,283 @@
+From 92ba6f7716f08d7bafc76817c27e05c5cd4fdfbc Mon Sep 17 00:00:00 2001
+From: natew <natew@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:43:45 +0000
+Subject: [PATCH] embed: run a compiled program inside a host app, and find one
+ in __TEXT,__bun of a loaded image
+
+---
+ src/jsc/bindings/c-bindings.cpp | 20 +++++++
+ src/runtime/bin_entry/embed.rs  | 96 +++++++++++++++++++++++++++++++++
+ src/runtime/bin_entry/mod.rs    |  1 +
+ src/runtime/cli/mod.rs          | 45 +++++++++++++++-
+ src/runtime/cli/run_command.rs  | 25 ++++++---
+ 5 files changed, 178 insertions(+), 9 deletions(-)
+ create mode 100644 src/runtime/bin_entry/embed.rs
+
+diff --git a/src/jsc/bindings/c-bindings.cpp b/src/jsc/bindings/c-bindings.cpp
+index f9a6ec7019..51b58d362a 100644
+--- a/src/jsc/bindings/c-bindings.cpp
++++ b/src/jsc/bindings/c-bindings.cpp
+@@ -1515,13 +1515,33 @@ struct BlobHeader {
+ 
+ #if OS(DARWIN)
+ 
++#include <mach-o/dyld.h>
+ #include <mach-o/getsect.h>
+ #include <mach-o/ldsyms.h>
+ 
+ extern "C" BlobHeader __attribute__((section("__BUN,__bun"))) BUN_COMPILED = { 0, 0 };
+ 
++// An App Store binary may have only one executable segment, so an app built on
++// this runtime as a library carries its program in __TEXT,__bun of another image.
++static uint64_t* programInTextOfLoadedImage()
++{
++    for (uint32_t i = 0, count = _dyld_image_count(); i < count; i++) {
++        unsigned long size = 0;
++        auto* header = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(i));
++        uint8_t* data = getsectiondata(header, "__TEXT", "__bun", &size);
++        if (!data || size < sizeof(uint64_t))
++            continue;
++        auto* length = reinterpret_cast<uint64_t*>(data);
++        if (*length <= size - sizeof(uint64_t))
++            return length;
++    }
++    return nullptr;
++}
++
+ extern "C" uint64_t* Bun__getStandaloneModuleGraphMachoLength()
+ {
++    if (!BUN_COMPILED.size)
++        return programInTextOfLoadedImage();
+     // A corrupt file can claim any length, so check it against the section size from the load command.
+     unsigned long sectionSize = 0;
+     uint8_t* sectionData = getsectiondata(&_mh_execute_header, "__BUN", "__bun", &sectionSize);
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+new file mode 100644
+index 0000000000..f4be364d41
+--- /dev/null
++++ b/src/runtime/bin_entry/embed.rs
+@@ -0,0 +1,96 @@
++//! Entry points for a host that owns the thread, such as a React Native engine.
++//! The host calls `bun_embed_create` on its JS thread, installs its own globals
++//! on the returned `JSGlobalContextRef`, runs the program with
++//! `bun_embed_run_entry`, and calls `bun_embed_tick` where it drains microtasks.
++//! Every call after `bun_embed_create` must come from that same thread.
++
++use core::ffi::{c_char, c_int, c_void};
++
++use bun_jsc::js_promise::Status as PromiseStatus;
++use bun_jsc::virtual_machine::VirtualMachine;
++
++static EMBEDDED: bun_core::RacyCell<Option<(&'static VirtualMachine, &'static [u8])>> =
++    bun_core::RacyCell::new(None);
++
++fn embedded() -> (&'static VirtualMachine, &'static [u8]) {
++    // SAFETY: written once by `bun_embed_create` on the JS thread, read only there.
++    unsafe { (*EMBEDDED.get()).expect("bun_embed_create was not called") }
++}
++
++/// Returns the program's `JSGlobalContextRef`, or null when this image has no
++/// compiled program or it failed to start (the reason is printed to stderr).
++///
++/// # Safety
++/// `argv` must hold `argc` NUL-terminated strings that live for the process.
++/// Call once per process.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_create(argc: c_int, argv: *const *const c_char) -> *mut c_void {
++    #[cfg(any(target_os = "android", all(target_os = "linux", not(target_env = "gnu"))))]
++    {
++        unsafe extern "C" {
++            safe fn Bun__askForAddressSpaceToStart();
++        }
++        Bun__askForAddressSpaceToStart();
++    }
++    unsafe { bun_core::init_argv(argc, argv) };
++    bun_crash_handler::init();
++    super::use_mimalloc_in_dependencies();
++    bun_core::output::stdio::init();
++    bun_core::StackCheck::configure_thread();
++
++    let Some((vm, entry)) = crate::cli::Cli::embed_start() else {
++        bun_core::output::flush();
++        return core::ptr::null_mut();
++    };
++    // Held for the life of the thread, as `Run::start` holds it, so JSC never
++    // drains microtasks behind the host's back.
++    core::mem::forget(vm.global().vm().get_api_lock());
++    // SAFETY: first and only write, on the JS thread.
++    unsafe { *EMBEDDED.get() = Some((vm, entry)) };
++    // A `JSGlobalContextRef` is the `JSGlobalObject` pointer (JSC's APICast.h).
++    std::ptr::from_ref(vm.global()).cast_mut().cast()
++}
++
++/// Runs the compiled entry module. Returns 0 on success. On a thrown error it
++/// returns 1 and writes the thrown value (a `JSValueRef`) to `exception`; on a
++/// load failure it returns 2 after printing the reason.
++///
++/// # Safety
++/// After a successful `bun_embed_create`, on its thread; `exception` is null or writable.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_run_entry(exception: *mut *const c_void) -> c_int {
++    let (vm, entry) = embedded();
++    let status = match vm.load_entry_point(Some(entry)) {
++        Ok(promise) => {
++            // SAFETY: a live GC cell returned by the module loader.
++            let promise = unsafe { &mut *promise };
++            if promise.status() == PromiseStatus::Rejected {
++                let thrown = promise.result(vm.jsc_vm());
++                promise.set_handled();
++                if !exception.is_null() {
++                    // SAFETY: caller-provided out slot. A `JSValueRef` is the encoded value.
++                    unsafe { *exception = thrown.encoded() as *const c_void };
++                }
++                1
++            } else {
++                vm.tick();
++                0
++            }
++        }
++        Err(err) => {
++            bun_core::Output::err(err, "the embedded program's entry failed to load", ());
++            2
++        }
++    };
++    bun_core::output::flush();
++    status
++}
++
++/// Runs ready tasks and drains microtasks without blocking.
++///
++/// # Safety
++/// After a successful `bun_embed_create`, on its thread.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_tick() {
++    embedded().0.tick();
++}
+diff --git a/src/runtime/bin_entry/mod.rs b/src/runtime/bin_entry/mod.rs
+index 122d02780a..4001042007 100644
+--- a/src/runtime/bin_entry/mod.rs
++++ b/src/runtime/bin_entry/mod.rs
+@@ -33,6 +33,7 @@
+ use core::ffi::{c_char, c_int};
+ 
+ mod c_abi_exports;
++mod embed;
+ 
+ // Force-link `bun_platform` so its `#[no_mangle]` C exports
+ // (`sys_epoll_pwait2`, …) reach the linker.
+diff --git a/src/runtime/cli/mod.rs b/src/runtime/cli/mod.rs
+index bd41f82898..1fa86c7469 100644
+--- a/src/runtime/cli/mod.rs
++++ b/src/runtime/cli/mod.rs
+@@ -401,6 +401,27 @@ pub(crate) mod cli {
+             bun_crash_handler::handle_root_error(err);
+         }
+     }
++
++    /// `start` for an embedder: the same process setup, then the embedded
++    /// program's VM on the calling thread with its entry not yet run.
++    pub(crate) fn embed_start(
++    ) -> Option<(&'static bun_jsc::virtual_machine::VirtualMachine, &'static [u8])> {
++        bun_crash_handler::cli_state::set_main_thread_id(bun_threading::current_thread_id());
++        bun_core::set_start_time(bun_core::time::nano_timestamp());
++        // SAFETY: called once, before any other thread touches `LOG_` or the arena.
++        let log = unsafe { (*LOG_.get()).write(bun_ast::Log::init()) };
++        unsafe { (*super::CLI_ARENA.get()).write(bun_alloc::Arena::new()) };
++        match Command::embed_boot(log) {
++            Ok(booted) => booted,
++            Err(err) => {
++                let _ = log.print(std::ptr::from_mut::<bun_core::io::Writer>(
++                    bun_core::Output::error_writer(),
++                ));
++                bun_core::Output::err(err, "the embedded program failed to start", ());
++                None
++            }
++        }
++    }
+ }
+ pub(crate) use cli as Cli;
+ 
+@@ -1219,6 +1240,27 @@ pub(crate) mod command {
+         graph: *mut bun_standalone_graph::Graph,
+         log: &mut bun_ast::Log,
+     ) -> CmdResult {
++        let (ctx, entry_name, graph) = standalone_context(graph, log)?;
++        super::run_command::RunCommand::boot_standalone(ctx, entry_name, graph)?;
++        Ok(())
++    }
++
++    /// The embedded program's VM, ready for its entry, without Bun's event loop.
++    /// `None` when this image holds no compiled program.
++    pub(crate) fn embed_boot(
++        log: &mut bun_ast::Log,
++    ) -> crate::Result<Option<(&'static bun_jsc::virtual_machine::VirtualMachine, &'static [u8])>> {
++        let Some(graph) = bun_standalone_graph::Graph::from_executable()? else {
++            return Ok(None);
++        };
++        let (ctx, entry_name, graph) = standalone_context(graph, log)?;
++        Ok(Some(super::run_command::RunCommand::boot_standalone_vm(ctx, entry_name, graph)?))
++    }
++
++    fn standalone_context(
++        graph: *mut bun_standalone_graph::Graph,
++        log: &mut bun_ast::Log,
++    ) -> crate::Result<(&'static mut ContextData, Box<[u8]>, &'static bun_standalone_graph::Graph)> {
+         // SAFETY: `from_executable` returns a non-null `*mut Graph` whose
+         // backing storage is process-static (owned by the executable image).
+         let graph: &'static bun_standalone_graph::Graph = unsafe { &*graph };
+@@ -1296,8 +1338,7 @@ pub(crate) mod command {
+             .collect();
+ 
+         let entry_name = graph.main_module_path().to_vec().into_boxed_slice();
+-        super::run_command::RunCommand::boot_standalone(ctx, entry_name, graph)?;
+-        Ok(())
++        Ok((ctx, entry_name, graph))
+     }
+ 
+     /// `bun [run] <script>` / `bun --version` / bare `bun`. The dominant tag
+diff --git a/src/runtime/cli/run_command.rs b/src/runtime/cli/run_command.rs
+index bc9401910c..9e4c87f8b3 100644
+--- a/src/runtime/cli/run_command.rs
++++ b/src/runtime/cli/run_command.rs
+@@ -1213,6 +1213,23 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         entry_path: Box<[u8]>,
+         graph: &'static bun_standalone_graph::Graph,
+     ) -> crate::Result<()> {
++        let (vm, entry) = Self::boot_standalone_vm(ctx, entry_path, graph)?;
++        Run {
++            ctx,
++            vm,
++            entry_path: Some(entry),
++            unchecked: None,
++        }
++        .start()
++    }
++
++    /// Everything `boot_standalone` does before the event loop, so an embedder
++    /// can own the thread and run the entry itself.
++    pub(crate) fn boot_standalone_vm(
++        ctx: &mut ContextData,
++        entry_path: Box<[u8]>,
++        graph: &'static bun_standalone_graph::Graph,
++    ) -> crate::Result<(&'static VirtualMachine, &'static [u8])> {
+         use bun_standalone_graph::StandaloneModuleGraph::Flags as GraphFlags;
+ 
+         crate::cli::startup_options::refuse_code_the_compiler_did_not_see();
+@@ -1307,13 +1324,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         );
+         Self::do_preconnect(&ctx.runtime_options.preconnect);
+ 
+-        Run {
+-            ctx,
+-            vm,
+-            entry_path: Some(entry),
+-            unchecked: None,
+-        }
+-        .start()
++        Ok((vm, entry))
+     }
+ }
+ 
+-- 
+2.53.0
+
