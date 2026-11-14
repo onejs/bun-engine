@@ -1,0 +1,83 @@
+From 0e9bd18c6e25f0fe23d62054075d204620e17ce7 Mon Sep 17 00:00:00 2001
+From: natew <natew@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 21:05:04 +0000
+Subject: [PATCH] embed: drop and grab the JSC locks for a host, and keep
+ built-ins a program writes replaceable
+
+bun_embed_drop_locks and bun_embed_grab_locks let a host release the JSC lock around host object callbacks. BUN_AOT_REPLACE_WRITTEN=1 makes compile treat built-in members the program writes, including through helpers, as replaceable, which React Native polyfills need.
+---
+ src/aot/builtins/resolve.rs                 |  6 ++++++
+ src/aot/builtins/resolve/written_members.rs |  2 +-
+ src/aot/load/contents.rs                    |  4 ++++
+ src/jsc/bindings/bindings.cpp               | 13 +++++++++++++
+ 4 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/aot/builtins/resolve.rs b/src/aot/builtins/resolve.rs
+index 7607303109..7625465d2e 100644
+--- a/src/aot/builtins/resolve.rs
++++ b/src/aot/builtins/resolve.rs
+@@ -747,3 +747,9 @@ pub fn resolve_within(
+ ) -> ResolvedBuiltins {
+     resolver::run(input, Some(ranges), Some(facts))
+ }
++
++// a program built with BUN_AOT_REPLACE_WRITTEN may replace the built-in members it is seen writing
++pub fn replaces_written_builtins() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("BUN_AOT_REPLACE_WRITTEN").is_some())
++}
+diff --git a/src/aot/builtins/resolve/written_members.rs b/src/aot/builtins/resolve/written_members.rs
+index af8d247b88..2304538687 100644
+--- a/src/aot/builtins/resolve/written_members.rs
++++ b/src/aot/builtins/resolve/written_members.rs
+@@ -1475,7 +1475,7 @@ impl Resolver<'_, '_> {
+     }
+ 
+     pub(super) fn collect_replaced_members(&mut self) {
+-        if !self.input.runs_tests {
++        if !self.input.runs_tests && !crate::builtins::resolve::replaces_written_builtins() {
+             return;
+         }
+         let mut found = WritesFound::default();
+diff --git a/src/aot/load/contents.rs b/src/aot/load/contents.rs
+index 853824988e..f4931ed78f 100644
+--- a/src/aot/load/contents.rs
++++ b/src/aot/load/contents.rs
+@@ -235,6 +235,10 @@ impl FoundInFiles {
+         };
+         let (builtins, contents) = (&source.builtins, &source.contents);
+         self.names_added.extend_from_slice(builtins.names_added());
++        if !input.is_test_run && crate::builtins::resolve::replaces_written_builtins() {
++            (self.replaced_members).extend_from_slice(builtins.replaced_members());
++            (self.opened_holders).extend_from_slice(builtins.opened_holders());
++        }
+         if input.is_test_run && input.whose[file.idx()] != WhoseFile::OfProduct {
+             (self.replaced_members).extend_from_slice(builtins.replaced_members());
+             (self.opened_holders).extend_from_slice(builtins.opened_holders());
+diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
+index 88c660c095..18ed5e6d8c 100644
+--- a/src/jsc/bindings/bindings.cpp
++++ b/src/jsc/bindings/bindings.cpp
+@@ -5706,6 +5706,19 @@ extern "C" void BunEmbed__undelayMicrotasks()
+     delete std::exchange(embedMicrotaskDelay, nullptr);
+ }
+ 
++// this fork runs a class's property callbacks with the API lock held, where
++// upstream drops it. a host whose callback can wait on another thread that
++// uses JSC (react native creating a main-queue module) drops it around that wait
++extern "C" __attribute__((visibility("default"))) void* bun_embed_drop_locks(JSC::JSGlobalObject* globalObject)
++{
++    return new JSC::JSLock::DropAllLocks(globalObject->vm());
++}
++
++extern "C" __attribute__((visibility("default"))) void bun_embed_grab_locks(void* dropper)
++{
++    delete static_cast<JSC::JSLock::DropAllLocks*>(dropper);
++}
++
+ extern "C" void JSC__VM__releaseAPILock(JSC::VM* vm)
+ {
+     // https://github.com/WebKit/WebKit/blob/6cb5017d237ef7cb898582a22f05acca22322845/Source/JavaScriptCore/runtime/JSLock.cpp#L72
+-- 
+2.53.0
+

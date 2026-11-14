@@ -21,6 +21,8 @@ bun-engine/
 
 An image from `bun compile` only loads in the runtime it was compiled against, so the compiler and the frameworks of one release always go together.
 
+Compiled code normally treats built-in objects as read-only. React Native apps replace some of their members through polyfills, as FormatJS does with `Number.prototype.toLocaleString`, so One compiles with `BUN_AOT_REPLACE_WRITTEN=1`: every built-in member the program can be seen writing, including through a helper that receives the object, stays replaceable.
+
 ## Building
 
 The runtime is Bun's macOS configuration, cross-built on Linux and relinked as a dylib that exports the embed calls and the JavaScriptCore C API, then retagged for iOS on a Mac. Keeping the macOS configuration keeps the runtime facts equal to the macOS compiler's, so the Mac's `bun compile` produces images the iOS runtime loads.

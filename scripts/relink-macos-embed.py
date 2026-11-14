@@ -15,7 +15,8 @@ lazy = (build / 'bun-profile.lazy.rsp').read_text().split()
 llvm = Path(os.environ['BUN_TOOLCHAIN_LLVM']) / 'bin'
 # bun's darwin cross build downloads this sdk
 sdk = Path(os.environ.get('MACOS_SDK', Path.home() / '.bun/build-cache/MacOSX26.5.sdk'))
-patterns = ['_bun_embed_*', '_JSValue*', '_JSObject*', '_JSString*', '_JSContextGroup*', '_JSContextGet*',
+# thin lto internalizes bitcode symbols a wildcard names, so c++ embed calls are listed exactly
+patterns = ['_bun_embed_*', '_bun_embed_drop_locks', '_bun_embed_grab_locks', '_JSValue*', '_JSObject*', '_JSString*', '_JSContextGroup*', '_JSContextGet*',
             '_JSGlobalContext*', '_JSEvaluateScript', '_JSCheckScriptSyntax', '_JSGarbageCollect', '_JSClass*',
             '_JSPropertyName*', '_JSReportExtraMemoryCost', '_kJS*']
 exports = []
