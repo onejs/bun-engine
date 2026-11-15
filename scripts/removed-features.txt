@@ -1,0 +1,93 @@
+# features relink-macos-embed.py --remove leaves out of the runtime. names are bun's removable features
+# (build/darwin-release/codegen/removable-features.json). a removed feature's entry points trap, so this
+# lists only what a React Native app cannot reach: runtime code it never needs, and Bun and Node APIs
+# that Hermes lacks too, which React Native code does not import.
+
+# compiling and tooling, which bun compile removes from every program
+JIT
+ImageCompiler
+AotCompiler
+Tools
+Lint
+Install
+Fmt
+Check
+TestCommand
+BuildCommand
+Repl
+Create
+Upgrade
+InternalForTesting
+Test
+HotReload
+Bunfig
+Bundler
+CssParser
+ReactCompiler
+RuntimeTranspiler
+Plugin
+FileSystemRouter
+
+# servers, databases and storage clients
+Serve
+ServeHttp2
+Http3
+NodeQuic
+NodeHttp2
+NodeCluster
+Sql
+Sqlite
+SqliteExtensions
+Valkey
+S3Client
+S3Responses
+
+# processes, sockets and the host system
+Spawn
+BunSpawn
+BunSpawnSync
+ChildProcess
+Shell
+Terminal
+Ipc
+ProcessIpc
+Sockets
+TlsSockets
+Tls
+X509
+Dns
+Udp
+Ffi
+Unsafe
+NativeAddons
+Cron
+Secrets
+WebView
+OpenInEditor
+NodeRepl
+BunJsc
+BunInfo
+
+# Bun.* utilities
+HtmlRewriter
+Archive
+Markdown
+Xml
+Yaml
+Toml
+Json5
+Jsonc
+Jsonl
+Csrf
+Password
+Image
+Glob
+Semver
+Color
+StringWidth
+CompressionFunctions
+BunZstdCompress
+BunDeflate
+BrotliEncoder
+ZstdCompressor
+LibdeflateCompressor

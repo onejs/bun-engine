@@ -32,10 +32,16 @@ Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux 
 1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. Its data leaves out converters, transliteration, spoof checking and stringprep, which the runtime links no code for. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
-4. `scripts/relink-macos-embed.py` (Linux): links `embed-macos/libbun-stripped.dylib`, the runtime. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
-5. `scripts/package.sh <libbun-stripped.dylib> <bun> <version>` (Mac): runs `make-frameworks.sh` for device and simulator and writes the release tarball.
+4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
+5. `scripts/package.sh <libbun.dylib> <bun> <version>` (Mac): runs `make-frameworks.sh` for device and simulator and writes the release tarball.
 
 `make-frameworks.sh` retags the dylib for iOS (`dylib-template.py`), points the symbols the iOS SDK lacks at BunCompat (`patch-imports.py`, `ios-compat.c`) and adds the `LC_ENCRYPTION_INFO_64` command App Store validation requires (`encryption-info.py`). The runtime links with a header pad so its code starts at offset 0x4000, where Apple's linker puts it.
+
+## Removed features
+
+The runtime leaves out 81 of Bun's removable features, about 56 MB: compiling and tooling, which `bun compile` removes from every program anyway, and Bun and Node APIs a React Native app cannot reach because it never imports them and Hermes lacks them too (servers, databases, processes, sockets, the bundler and transpiler). `scripts/removed-features.txt` lists them. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` stay, since React Native's polyfills read every global they replace.
+
+Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `strip_features.py` uses its analysis instead: Bun's trim link reports every feature's entry points, references to the removed ones are pointed at a trap, the compiled objects are linked natively with `-dead_strip`, and the feature state marks them removed so their guards take the removed path.
 
 ## App Store
 
