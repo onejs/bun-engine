@@ -29,7 +29,7 @@ The runtime is Bun's macOS configuration, cross-built on Linux and relinked as a
 
 Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux steps need `bun`, `cargo`, `ninja`, `cmake` and `BUN_TOOLCHAIN_LLVM` pointing at the LLVM release Bun pins (23.1.5 at this commit), which includes `ld64.lld`.
 
-1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
+1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. Its data leaves out converters, transliteration, spoof checking and stringprep, which the runtime links no code for. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
 4. `scripts/relink-macos-embed.py` (Linux): links `embed-macos/libbun-stripped.dylib`, the runtime. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.

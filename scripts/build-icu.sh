@@ -16,4 +16,14 @@ CFLAGS="$F" CXXFLAGS="$F -std=c++17" "$I/dl/icu/source/runConfigureICU" MacOSX -
   --prefix="$I/out" > configure.log
 make -j"$(sysctl -n hw.ncpu)" > make.log
 make install > install.log
+# the runtime links no converter, transliterator, spoof checker or stringprep code, so their
+# 6.5 MB of data goes. icupkg names items after its output file, so it writes icudt74l.dat
+export DYLD_LIBRARY_PATH="$I/build/lib"
+mkdir -p "$I/slim"
+"$I/build/bin/icupkg" -l "$I/dl/icu/source/data/in/icudt74l.dat" | grep -E '\.cnv$|^cnvalias\.icu$|^translit/|\.spp$|\.cfu$' > "$I/slim/remove.txt"
+"$I/build/bin/icupkg" -r "$I/slim/remove.txt" "$I/dl/icu/source/data/in/icudt74l.dat" "$I/slim/icudt74l.dat"
+"$I/build/bin/genccode" -e icudt74 -a gcc-darwin -d "$I/slim" "$I/slim/icudt74l.dat"
+clang -c -arch arm64 -mmacosx-version-min=13.0 "$I/slim/icudt74l_dat.S" -o "$I/slim/icudt74l_dat.o"
+rm -f "$I/out/lib/libicudata.a"
+ar rcs "$I/out/lib/libicudata.a" "$I/slim/icudt74l_dat.o"
 ls -la "$I/out/lib/"libicu{i18n,uc,data}.a
