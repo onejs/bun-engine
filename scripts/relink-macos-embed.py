@@ -32,7 +32,10 @@ flags = ['-Wl,@' + str(out / 'lazy.rsp'), '-dynamiclib',
          '-Wl,-headerpad,0x3478', '-Wl,-adhoc_codesign', '-lresolv']
 # ios apps may not link the system icu, so the runtime carries its own
 icu = [str(root / 'icu-macos' / x) for x in ('libicui18n.a', 'libicuuc.a', 'libicudata.a')]
-lto = ['-flto=thin', '-Wl,--lto-O3']
+# bun's own release link flags. every export is c, so whole-program visibility devirtualizes safely,
+# and icf needs its address-significance tables emitted during lto
+lto = ['-flto=thin', '-Wl,--lto-O3', '-Wl,--lto-CGO3', '-Wl,-mllvm,-whole-program-visibility', '-fwhole-program-vtables',
+       '-fforce-emit-vtables', '-Wl,-mllvm,-inline-cold-callsite-threshold=0', '-fno-keep-static-consts', '-Wl,--icf=safe']
 dylib = out / 'libbun.dylib'
 if len(sys.argv) < 3 or sys.argv[1] != '--remove':
     subprocess.run([str(llvm / 'clang++'), '@' + str(out / 'inputs.rsp'), *flags, *lto,
@@ -57,7 +60,7 @@ else:
     lazy = [p for p in (out / 'lazy.rsp').read_text().split() if native(p)]
     (trim / 'native.rsp').write_text('\n'.join(objs + eager + icu) + '\n')
     (trim / 'native-lazy.rsp').write_text('\n'.join(lazy) + '\n')
-    native_flags = ['-Wl,@' + str(trim / 'native-lazy.rsp')] + flags[1:]
+    native_flags = ['-Wl,@' + str(trim / 'native-lazy.rsp')] + flags[1:] + ['-Wl,--icf=safe']
     subprocess.run([str(llvm / 'clang++'), '@' + str(trim / 'native.rsp'), *native_flags, '-o', str(dylib)], check=True)
     strip_features.mark_removed(dylib, trim / 'features.json', removed, llvm)
 subprocess.run([str(llvm / 'llvm-strip'), '-S', '-o', str(out / 'libbun-stripped.dylib'), str(dylib)], check=True)
