@@ -16,6 +16,10 @@ bun-engine/
   ios/iphoneos/BunEngine.o        the runtime for devices, one prelinked object
   ios/iphonesimulator/BunEngine.o the same for the simulator
   ios/BunEngine.tbd               the runtime's exports, for debug builds that ship no runtime
+  macos/arm64/BunEngine.o         the native Apple Silicon runtime
+  macos/x86_64/BunEngine.o        the native Intel runtime (when an Intel stage is supplied)
+  macos/x86_64/bun                the matching Intel compiler
+  embed.h                         public embedding and task scheduling API
   VERSION
 ```
 
@@ -36,9 +40,20 @@ Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux 
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
 4. `scripts/relink-macos-embed.ts --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
 5. `scripts/stage-inputs.sh` (Linux): stages the native objects of step 4's link, without debug info, in `$BUN_ENGINE_WORK/stage.tar.zst`. Copy it to the Mac and unpack it.
-6. `scripts/package.sh <stage> <bun> <version>` (Mac): runs `make-static.sh` and writes the release tarball.
+6. `scripts/package.sh <stage> <bun> <version> [x86_64-stage x86_64-bun]` (Mac): runs `make-static.sh` and writes the release tarball.
 
-`make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.py` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.py` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
+`make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.ts` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.ts` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
+
+For an Intel macOS runtime, set `BUN_ENGINE_ARCH=x86_64` for the build, relink,
+stage and static steps, with a separate `BUN_ENGINE_WORK` and architecture-matched
+ICU archives. Package its stripped `build/darwin-x64-release/bun` alongside the
+object as `macos/x86_64/bun` when compiling on Intel hosts. It builds
+`build/darwin-x64-release` and exports only a macOS object.
+The arm64 stage exports both macOS and iOS objects. `BUN_ENGINE_BUILD_DIR` selects
+a prepared build directory. The public header uses a quote include path (`-iquote`),
+so the release VERSION file cannot shadow the C++ `<version>` header on macOS.
+Link Intel apps with `-Wl,-segalign,0x4000` to preserve the runtime's 16 KiB section
+alignment; Apple Silicon already uses that segment alignment.
 
 ## Host scheduling
 

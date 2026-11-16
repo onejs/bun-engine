@@ -15,7 +15,19 @@ import { features, stage, markRemoved } from "./strip-features";
 
 const root =
   process.env.BUN_ENGINE_WORK ?? join(homedir(), ".cache/bun-engine");
-const build = realpathSync(join(root, "bun-src/build/darwin-release")),
+const arch = process.env.BUN_ENGINE_ARCH ?? "arm64";
+if (arch !== "arm64" && arch !== "x86_64")
+  throw new Error("expected arm64 or x86_64");
+const build = realpathSync(
+    join(
+      root,
+      "bun-src",
+      process.env.BUN_ENGINE_BUILD_DIR ??
+        (arch === "arm64"
+          ? "build/darwin-release"
+          : "build/darwin-x64-release"),
+    ),
+  ),
   out = join(root, "embed-macos");
 mkdirSync(out, { recursive: true });
 const ninja = readFileSync(join(build, "build.ninja"), "utf8").replaceAll(
@@ -65,13 +77,14 @@ writeFileSync(join(out, "exports.txt"), exports.join("\n") + "\n");
 const flags = [
   "-Wl,@" + join(out, "lazy.rsp"),
   "-dynamiclib",
-  "--target=arm64-apple-macosx",
+  "--target=" + arch + "-apple-macosx",
   "-mmacosx-version-min=13.0",
   "-mlinker-version=705",
   "-isysroot",
   sdk,
   "--ld-path=" + join(llvm, "ld64.lld"),
   "-Wl,-dead_strip",
+  "-Wl,-rename_section,__BUN,__bun,__DATA,__bun",
   "-Wl,-alias,__mh_dylib_header,__mh_execute_header",
   "-Wl,-dead_strip_dylibs",
   "-exported_symbols_list",
@@ -145,7 +158,7 @@ if (args.length === 0) {
     "-o",
     join(trim, "libbun.dylib"),
   ]);
-  const objects = stage(trim, llvm, removed, join(trim, "strip"));
+  const objects = stage(trim, llvm, removed, join(trim, "strip"), arch);
   const native = (path: string) => {
     if (path.startsWith("--")) return true;
     const fd = openSync(path, "r"),

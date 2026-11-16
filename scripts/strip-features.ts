@@ -9,7 +9,7 @@ import {
 import { join, resolve } from "node:path";
 
 const entry = /^(\S+) (\S+) (\d+) (.*) \((\S+), (\d+) bytes\)$/;
-const trap =
+const armTrap =
   ".text\n.globl _bun_removed_feature\n.p2align 14\n_bun_removed_feature:\n.rept 4096\nbrk #0xbad\n.endr\n";
 class MachO {
   sections: { flags: number; offset: number; count: number }[] = [];
@@ -34,10 +34,11 @@ class MachO {
       else if (command === 0xb) this.dysymtab = at;
       at += size;
     }
-    if (!this.symtab || !this.dysymtab)
+    if (this.symtab && !this.dysymtab)
       throw new Error("object has no symbol tables");
   }
   symbols() {
+    if (!this.symtab) return [];
     const bytes = this.bytes,
       offset = bytes.readUInt32LE(this.symtab + 8),
       count = bytes.readUInt32LE(this.symtab + 12),
@@ -95,7 +96,7 @@ class MachO {
           word = this.bytes.readUInt32LE(at);
         if (
           (word >>> 27) & 1 &&
-          word >>> 28 !== 10 &&
+          (this.bytes.readUInt32LE(4) !== 0x100000c || word >>> 28 !== 10) &&
           targets.has(word & 0xffffff)
         ) {
           this.bytes.writeUInt32LE(((word & 0xff000000) | to) >>> 0, at);
@@ -150,6 +151,7 @@ export function stage(
   llvm: string,
   removed: Set<string>,
   output: string,
+  arch: "arm64" | "x86_64" = "arm64",
 ) {
   const compiled = join(trim, "trim-work/compiled"),
     objects = new Map<string, MachO>();
@@ -201,9 +203,14 @@ export function stage(
       edited++;
     } else symlinkSync(resolve(compiled, name), join(folder, name));
   }
-  writeFileSync(join(output, "trap.s"), trap);
+  writeFileSync(
+    join(output, "trap.s"),
+    arch === "arm64"
+      ? armTrap
+      : ".text\n.globl _bun_removed_feature\n.p2align 14\n_bun_removed_feature:\n.rept 8192\nud2\n.endr\n",
+  );
   execFileSync(join(llvm, "clang"), [
-    "--target=arm64-apple-macosx",
+    "--target=" + arch + "-apple-macosx",
     "-c",
     join(output, "trap.s"),
     "-o",
