@@ -1,4 +1,4 @@
-From 08cee8aa932de8f82e2846d53bdccf768f467b92 Mon Sep 17 00:00:00 2001
+From 732d8d052760694c9b6fb5778b162e3ba5951ad6 Mon Sep 17 00:00:00 2001
 From: natew <natew@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 08:50:10 +0000
 Subject: [PATCH] embed: reserve no cell cage for a program built with
@@ -6,13 +6,13 @@ Subject: [PATCH] embed: reserve no cell cage for a program built with
 
 ---
  src/jsc/bindings/BunCompiledModules.cpp | 9 +++++++++
- src/jsc/bindings/ZigGlobalObject.cpp    | 7 ++++---
+ src/jsc/bindings/ZigGlobalObject.cpp    | 9 ++++++---
  src/jsc/compiled_program.rs             | 6 ++++++
  src/jsc/lib.rs                          | 4 ++++
  src/runtime/cli/run_command.rs          | 2 ++
  src/runtime/cli/run_compiled.rs         | 6 ++++++
  src/runtime/cli/test_command.rs         | 1 +
- 7 files changed, 32 insertions(+), 3 deletions(-)
+ 7 files changed, 34 insertions(+), 3 deletions(-)
 
 diff --git a/src/jsc/bindings/BunCompiledModules.cpp b/src/jsc/bindings/BunCompiledModules.cpp
 index 8e7ddd05ab..4415c374dc 100644
@@ -42,7 +42,7 @@ index 8e7ddd05ab..4415c374dc 100644
  {
      *pages = nullptr;
 diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
-index 2c69e17f52..be8b6f6398 100644
+index 2c69e17f52..971a25a113 100644
 --- a/src/jsc/bindings/ZigGlobalObject.cpp
 +++ b/src/jsc/bindings/ZigGlobalObject.cpp
 @@ -354,11 +354,11 @@ extern "C" bool Bun__isOptionThatCompiledCodeDoesNotTake(const char* entry)
@@ -59,12 +59,21 @@ index 2c69e17f52..be8b6f6398 100644
          locksBuiltinsWithoutImage = locksBuiltins;
          if (locksBuiltins)
              JSC::AOT::lockBuiltinsWithoutImage();
-@@ -523,7 +523,8 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
+@@ -486,6 +486,9 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
+                     }
+                 }
+             }
++            // after the loop: jsc reserves the cage for any nonzero size, and a program built with --aot-huge-heap never uses it
++            if (runsWideProgram)
++                JSC::Options::markedBlockCageSizeInMB() = 0;
+             if (const char8_t* directory = JSC::Options::samplingProfilerPath()) {
+                 s_samplingProfilerDirectory = directory;
+                 JSC::Options::samplingProfilerPath() = nullptr;
+@@ -523,7 +526,7 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
              }
              JSC::Options::assertOptionsAreCoherent();
          }); // end JSC::initialize lambda
 -        if (runsCompiledCode)
-+        // a program built with --aot-huge-heap reaches any address, and requireCellCage asks nothing of it
 +        if (runsCompiledCode && !runsWideProgram)
              Bun::initializeCellCage();
  
