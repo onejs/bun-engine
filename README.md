@@ -34,17 +34,31 @@ Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux 
 1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. Its data leaves out converters, transliteration, spoof checking and stringprep, which the runtime links no code for. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
-4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
+4. `scripts/relink-macos-embed.ts --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
 5. `scripts/stage-inputs.sh` (Linux): stages the native objects of step 4's link, without debug info, in `$BUN_ENGINE_WORK/stage.tar.zst`. Copy it to the Mac and unpack it.
 6. `scripts/package.sh <stage> <bun> <version>` (Mac): runs `make-static.sh` and writes the release tarball.
 
 `make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.py` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.py` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
 
+## Host scheduling
+
+The main JS thread calls `bun_embed_create`, installs its globals, registers a
+`bun_embed_set_wakeup` callback, then runs the entry. The Darwin callback runs
+on the main queue when the runtime's kqueue becomes readable, including tasks
+posted by the HTTP thread. It schedules `bun_embed_tick`; notifications coalesce
+until that tick drains ready I/O, timers, tasks and microtasks without blocking.
+The host also schedules a timer from `bun_embed_next_timeout`: milliseconds
+until the nearest runtime timer, zero for ready work, or NaN when idle. The query
+does not execute JavaScript. Timer callbacks need no display frame unless they
+change the rendered tree. Passing null to `bun_embed_set_wakeup` unregisters
+before the user pointer is released. The readiness API requires the main JS thread.
+The declarations ship as `embed.h`.
+
 ## Removed features
 
 The runtime leaves out 81 of Bun's removable features, about 56 MB: compiling and tooling, which `bun compile` removes from every program anyway, and Bun and Node APIs a React Native app cannot reach because it never imports them and Hermes lacks them too (servers, databases, processes, sockets, the bundler and transpiler). `scripts/removed-features.txt` lists them. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` stay, since React Native's polyfills read every global they replace.
 
-Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `strip_features.py` uses its analysis instead: Bun's trim link reports every feature's entry points, references to the removed ones are pointed at a trap, the compiled objects are linked natively with `-dead_strip`, and the feature state marks them removed so their guards take the removed path.
+Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `strip-features.ts` uses its analysis instead: Bun's trim link reports every feature's entry points, references to the removed ones are pointed at a trap, the compiled objects are linked natively with `-dead_strip`, and the feature state marks them removed so their guards take the removed path.
 
 ## App Store
 

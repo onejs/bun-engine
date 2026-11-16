@@ -9,6 +9,7 @@ mkdir -p "$2" && OUT=$(cd "$2" && pwd)
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+cp "$HERE/../embed.h" "$OUT/embed.h"
 cd "$STAGE"
 # ld -r keeps MH_SUBSECTIONS_VIA_SYMBOLS only when every input has it, and dead stripping needs it
 mkdir -p "$WORK/eager" "$WORK/lazy"

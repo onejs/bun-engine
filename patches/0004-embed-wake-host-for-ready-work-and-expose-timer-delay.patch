@@ -1,0 +1,220 @@
+diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
+index 18ed5e6d8c4f4dc5dfcffc0211916117a52044b4..c99172ac0b357a0ed8905358b98ff87d7b515b47 100644
+--- a/src/jsc/bindings/bindings.cpp
++++ b/src/jsc/bindings/bindings.cpp
+@@ -8,6 +8,10 @@
+  *      can be disabled if necessary. Consult cppbind.ts for details.
+  */
+ #include "root.h"
++#if OS(DARWIN)
++#include <dispatch/dispatch.h>
++#include <pthread.h>
++#endif
+ 
+ #include "JavaScriptCore/ErrorType.h"
+ #include "JavaScriptCore/TopExceptionScope.h"
+@@ -5706,6 +5710,55 @@ extern "C" void BunEmbed__undelayMicrotasks()
+     delete std::exchange(embedMicrotaskDelay, nullptr);
+ }
+ 
++#if OS(DARWIN)
++struct EmbedWakeup {
++    dispatch_source_t source;
++    void (*callback)(void*);
++    void* user;
++    bool suspended = false;
++};
++static EmbedWakeup* embedWakeup;
++
++extern "C" void BunEmbed__setWakeup(int fd, void (*callback)(void*), void* user)
++{
++    RELEASE_ASSERT(pthread_main_np());
++    if (auto* previous = std::exchange(embedWakeup, nullptr)) {
++        dispatch_source_cancel(previous->source);
++        if (previous->suspended)
++            dispatch_resume(previous->source);
++        dispatch_release(previous->source);
++    }
++    if (!callback)
++        return;
++    auto* registration = new EmbedWakeup {
++        dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, fd, 0, dispatch_get_main_queue()), callback, user
++    };
++    RELEASE_ASSERT(registration->source);
++    embedWakeup = registration;
++    dispatch_set_context(registration->source, registration);
++    dispatch_source_set_event_handler_f(registration->source, [](void* context) {
++        auto* registration = static_cast<EmbedWakeup*>(context);
++        if (embedWakeup != registration)
++            return;
++        dispatch_suspend(registration->source);
++        registration->suspended = true;
++        registration->callback(registration->user);
++    });
++    dispatch_source_set_cancel_handler_f(registration->source, [](void* context) {
++        delete static_cast<EmbedWakeup*>(context);
++    });
++    dispatch_resume(registration->source);
++}
++
++extern "C" void BunEmbed__rearmWakeup()
++{
++    if (embedWakeup && embedWakeup->suspended) {
++        embedWakeup->suspended = false;
++        dispatch_resume(embedWakeup->source);
++    }
++}
++#endif
++
+ // this fork runs a class's property callbacks with the API lock held, where
+ // upstream drops it. a host whose callback can wait on another thread that
+ // uses JSC (react native creating a main-queue module) drops it around that wait
+diff --git a/src/jsc/event_loop.rs b/src/jsc/event_loop.rs
+index 1260d2804a65a3d1d9253a332b5d696df83c0eac..58988981b0d83712d0f21290ceb35e5b80bc67b3 100644
+--- a/src/jsc/event_loop.rs
++++ b/src/jsc/event_loop.rs
+@@ -1052,7 +1052,7 @@ impl EventLoop {
+         unsafe { &mut *self.yield_tasks.as_ptr() }.push(task);
+     }
+ 
+-    pub(crate) fn has_yield_tasks(&self) -> bool {
++    pub fn has_yield_tasks(&self) -> bool {
+         // SAFETY: a read of the length.
+         !unsafe { &*self.yield_tasks.as_ptr() }.is_empty()
+     }
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+index 366f290a59d6f4df72d5293764ddc6bf9bb5244a..a3ab3f78e264415dcb5e945c9100c080cc2a99b2 100644
+--- a/src/runtime/bin_entry/embed.rs
++++ b/src/runtime/bin_entry/embed.rs
+@@ -20,6 +20,10 @@ static JS_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLo
+ unsafe extern "C" {
+     fn BunEmbed__delayMicrotasks(vm: *mut c_void);
+     fn BunEmbed__undelayMicrotasks();
++    #[cfg(target_os = "macos")]
++    fn BunEmbed__setWakeup(fd: c_int, callback: Option<unsafe extern "C" fn(*mut c_void)>, user: *mut c_void);
++    #[cfg(target_os = "macos")]
++    fn BunEmbed__rearmWakeup();
+ }
+ 
+ fn jsc_vm(vm: &VirtualMachine) -> *mut c_void {
+@@ -32,7 +36,19 @@ fn tick(vm: &VirtualMachine) {
+     // ending the delay drains JSC's queue
+     unsafe { BunEmbed__undelayMicrotasks() };
+     if JS_THREAD.get() == Some(&std::thread::current().id()) {
++        let el = vm.event_loop();
++        el.tick_immediate_tasks();
++        el.promote_yield_tasks();
++        el.run_imminent_gc_timer();
++        let loop_ = el.usockets_loop();
++        loop_.ref_();
++        loop_.tick_without_idle();
++        loop_.unref();
++        crate::jsc_hooks::timer_all().drain_timers(vm);
+         vm.tick();
++        vm.on_after_event_loop();
++        #[cfg(target_os = "macos")]
++        unsafe { BunEmbed__rearmWakeup() };
+     }
+     unsafe { BunEmbed__delayMicrotasks(jsc_vm(vm)) };
+ }
+@@ -127,3 +143,37 @@ pub(crate) unsafe extern "C" fn bun_embed_run_entry(exception: *mut *const c_voi
+ pub(crate) unsafe extern "C" fn bun_embed_tick() {
+     tick(embedded().0);
+ }
++
++/// Registers a coalesced readiness notification on Darwin's main queue.
++/// The callback may tick immediately or schedule a tick.
++/// Passing null unregisters and prevents further calls to the previous user.
++///
++/// # Safety
++/// Call after create, on the main JS thread. User stays live until unregister.
++#[cfg(target_os = "macos")]
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_set_wakeup(
++    callback: Option<unsafe extern "C" fn(*mut c_void)>, user: *mut c_void,
++) {
++    assert_eq!(JS_THREAD.get(), Some(&std::thread::current().id()));
++    let vm = embedded().0;
++    vm.event_loop().ensure_waker();
++    unsafe { BunEmbed__setWakeup(vm.event_loop().usockets_loop().fd(), callback, user) };
++}
++
++/// Milliseconds until the next timer, zero for ready work, NaN when idle.
++/// This query does not fire timers or invoke JavaScript.
++///
++/// # Safety
++/// Call after create, on its JS thread.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_next_timeout() -> f64 {
++    assert_eq!(JS_THREAD.get(), Some(&std::thread::current().id()));
++    let vm = embedded().0;
++    let el = vm.event_loop();
++    if el.has_pending_tasks() || el.immediate_task_count() > 0 || el.has_yield_tasks()
++        || !el.imminent_gc_timer.load(core::sync::atomic::Ordering::Acquire).is_null() {
++        return 0.0;
++    }
++    crate::jsc_hooks::timer_all().next_timeout_ms()
++}
+diff --git a/src/runtime/timer/WTFTimer.rs b/src/runtime/timer/WTFTimer.rs
+index 9da4381013b150a220262fd9a64d3bc3a8437c28..025d2c9363f89bdc3331fc0fb920497d81ae6b36 100644
+--- a/src/runtime/timer/WTFTimer.rs
++++ b/src/runtime/timer/WTFTimer.rs
+@@ -108,6 +108,11 @@ impl WTFTimer {
+         let t = unsafe { bun_ptr::ThisPtr::new(this) };
+         let imminent_br = t.imminent;
+         let imminent = imminent_br.get();
++        let vm = unsafe { t.vm.as_ref() };
++        let all = crate::jsc_hooks::timer_all_of(vm);
++        let wake_owner = || {
++            if all.thread_id != std::thread::current().id() { vm.wakeup(); }
++        };
+ 
+         // There's only one of these per VM, and each VM has its own imminent_gc_timer.
+         // Only set imminent if it's not already set to avoid overwriting another timer.
+@@ -118,6 +123,7 @@ impl WTFTimer {
+                 Ordering::SeqCst,
+                 Ordering::SeqCst,
+             );
++            wake_owner();
+             return;
+         }
+         // Clear imminent if this timer was the one that set it.
+@@ -143,13 +149,8 @@ impl WTFTimer {
+             interval.nsec -= NS_PER_S;
+         }
+ 
+-        // SAFETY: `t.vm` owns this timer's heap; `wtf_arm` is safe from any thread.
+-        unsafe {
+-            let state = crate::jsc_hooks::runtime_state_of(t.vm.as_ptr());
+-            (*state)
+-                .timer
+-                .wtf_arm(ptr::addr_of_mut!((*this).event_loop_timer), &interval);
+-        }
++        all.wtf_arm(unsafe { ptr::addr_of_mut!((*this).event_loop_timer) }, &interval);
++        wake_owner();
+     }
+ 
+     /// # Safety
+diff --git a/src/runtime/timer/mod.rs b/src/runtime/timer/mod.rs
+index d9c724eeb8c111ab543c12994bf9117979515e59..18a72b999eab2a8f275a292f47940f71938c0f66 100644
+--- a/src/runtime/timer/mod.rs
++++ b/src/runtime/timer/mod.rs
+@@ -842,6 +842,18 @@ impl All {
+         }
+     }
+ 
++    pub(crate) fn next_timeout_ms(&self) -> f64 {
++        self.assert_js_thread();
++        let regular = self.timers.peek().map(|timer| unsafe { (*timer).next.get() });
++        let wtf = self.wtf_timers.lock().peek().map(|timer| unsafe { (*timer).next.get() });
++        let Some(next) = Self::soonest(regular, wtf) else { return f64::NAN; };
++        if self.is_due_when_idle() { return 0.0; }
++        let now = Timespec::now(TimespecMockMode::ForceRealTime);
++        if !next.greater(&now) { return 0.0; }
++        let delay = next.duration(&now);
++        delay.sec as f64 * 1000.0 + delay.nsec as f64 / 1_000_000.0
++    }
++
+     /// Called from `EventLoop::auto_tick` to compute the epoll/kqueue timeout.
+     /// Returns `true` if `spec` was written. `now_out` receives the monotonic reading this
+     /// took, if any, for the caller to share with the tick (see `NOW_NS_UNKNOWN`).

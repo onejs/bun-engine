@@ -1,4 +1,4 @@
-# features relink-macos-embed.py --remove leaves out of the runtime. names are bun's removable features
+# features relink-macos-embed.ts --remove leaves out of the runtime. names are bun's removable features
 # (build/darwin-release/codegen/removable-features.json). a removed feature's entry points trap, so this
 # lists only what a React Native app cannot reach: runtime code it never needs, and Bun and Node APIs
 # that Hermes lacks too, which React Native code does not import.

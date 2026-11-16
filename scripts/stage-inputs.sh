@@ -1,5 +1,5 @@
 #!/bin/bash
-# stage-inputs.sh (run on linux after relink-macos-embed.py --remove)
+# stage-inputs.sh (run on linux after relink-macos-embed.ts --remove)
 # stages the native relink's inputs for make-static.sh in $BUN_ENGINE_WORK/stage.tar.zst: eager
 # objects, and every native archive member for lazy.a. debug info and llvm's address-significance
 # tables go, since apple's ld -r keeps __llvm_addrsig as plain data. bitcode members were compiled
