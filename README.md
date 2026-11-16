@@ -23,6 +23,8 @@ The app executable links `BunEngine.o` statically, so no Bun image loads before 
 
 Compiled code normally treats built-in objects as read-only. React Native apps replace some of their members through polyfills, as FormatJS does with `Number.prototype.toLocaleString`, so One compiles with `BUN_AOT_REPLACE_WRITTEN=1`: every built-in member the program can be seen writing, including through a helper that receives the object, stays replaceable.
 
+One compiles device programs with `--aot-huge-heap`, whose references reach any address. The runtime reserves its 32 GB heap cage only for a program compiled without it (One's simulator builds), so a device app needs no extended virtual addressing for its heap.
+
 ## Building
 
 The runtime is Bun's macOS configuration, cross-built on Linux, then prelinked on a Mac into one object that exports the embed calls and the JavaScriptCore C API, retagged for iOS. Keeping the macOS configuration keeps the runtime facts equal to the macOS compiler's, so the Mac's `bun compile` produces images the iOS runtime loads.
