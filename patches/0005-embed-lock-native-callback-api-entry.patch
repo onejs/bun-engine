@@ -1,0 +1,20 @@
+diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
+--- a/src/jsc/bindings/bindings.cpp
++++ b/src/jsc/bindings/bindings.cpp
+@@ -5765,6 +5765,16 @@
++extern "C" __attribute__((visibility("default"))) void bun_embed_lock(JSC::JSGlobalObject* globalObject)
++{
++    globalObject->vm().apiLock().lock();
++}
++
++extern "C" __attribute__((visibility("default"))) void bun_embed_unlock(JSC::JSGlobalObject* globalObject)
++{
++    globalObject->vm().apiLock().unlock();
++}
++
+ // this fork runs a class's property callbacks with the API lock held, where
+ // upstream drops it. a host whose callback can wait on another thread that
+ // uses JSC (react native creating a main-queue module) drops it around that wait
+ extern "C" __attribute__((visibility("default"))) void* bun_embed_drop_locks(JSC::JSGlobalObject* globalObject)
+ {
+     return new JSC::JSLock::DropAllLocks(globalObject->vm());

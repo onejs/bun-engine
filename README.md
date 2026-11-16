@@ -69,6 +69,12 @@ change the rendered tree. Passing null to `bun_embed_set_wakeup` unregisters
 before the user pointer is released. The readiness API requires the main JS thread.
 The declarations ship as `embed.h`.
 
+Native callbacks which allocate through the typed-array C API bracket that work
+with `bun_embed_lock(context)` and `bun_embed_unlock(context)`. JavaScriptCore
+drops the API lock before invoking a class's native function callback. This fork's
+typed-array allocation calls do not acquire it, so the callback must enter the VM
+before allocating and keep the lock while using borrowed typed-array storage.
+
 ## Removed features
 
 The runtime leaves out 81 of Bun's removable features, about 56 MB: compiling and tooling, which `bun compile` removes from every program anyway, and Bun and Node APIs a React Native app cannot reach because it never imports them and Hermes lacks them too (servers, databases, processes, sockets, the bundler and transpiler). `scripts/removed-features.txt` lists them. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` stay, since React Native's polyfills read every global they replace.
