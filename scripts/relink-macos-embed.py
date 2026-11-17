@@ -1,5 +1,5 @@
 # links bun's darwin objects into libbun.dylib exporting the embed calls and the JSC C API
-# (run on linux after bun-darwin-build.sh; icu-macos/ holds build-icu.sh's three archives).
+# (run on linux after bun-darwin-build.sh; icu-macos/ holds build-icu.sh's four archives).
 # --remove <features file> leaves the listed features out through strip_features.py
 from pathlib import Path
 import json, os, shutil, subprocess, sys
@@ -32,8 +32,9 @@ flags = ['-Wl,@' + str(out / 'lazy.rsp'), '-dynamiclib',
          '-Wl,-rename_segment,__DATA_DIRTY,__DATA',
          # an App Store binary's code starts on the page after its load commands, where its encryption extent begins
          '-Wl,-headerpad,0x3478', '-Wl,-adhoc_codesign', '-lresolv']
-# ios apps may not link the system icu, so the runtime carries its own
-icu = [str(root / 'icu-macos' / x) for x in ('libicui18n.a', 'libicuuc.a', 'libicudata.a')]
+# ios apps may not link the system icu, so the runtime carries its own. collation and display names come from
+# CoreFoundation, under the icu names, so that archive goes first (build-icu.sh)
+icu = [str(root / 'icu-macos' / x) for x in ('libicu-foundation.a', 'libicui18n.a', 'libicuuc.a', 'libicudata.a')] + ['-framework', 'CoreFoundation']
 # bun's own release link flags. every export is c, so whole-program visibility devirtualizes safely,
 # and icf needs its address-significance tables emitted during lto
 lto = ['-flto=thin', '-Wl,--lto-O3', '-Wl,--lto-CGO3', '-Wl,-mllvm,-whole-program-visibility', '-fwhole-program-vtables',
