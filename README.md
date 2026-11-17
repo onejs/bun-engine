@@ -46,7 +46,7 @@ Build the ARM64 Android runtime on Linux with `scripts/bun-android-build.sh`, us
 
 Android uses WebKit's static ICU libraries and data from the Android build. The Apple CoreFoundation substitutions apply only to iOS. One reads the Android library at `android/arm64-v8a/libbun.so` and its JavaScriptCore C headers at `android/include/JavaScriptCore` under the engine directory.
 
-The Android runtime and its compiler must have matching revisions, built-in module text and JavaScriptCore layout facts. The macOS compiler does not accept the Android runtime merely because their revisions match. A native Android compiler from `build/android-release/bun` accepts it. Keep that native compiler validation distinct from build-host cross-compilation support.
+The Android runtime and its compiler must have matching revisions, built-in module text and JavaScriptCore layout facts. The macOS compiler does not accept the Android runtime merely because their revisions match. Package the matching Android compiler from `build/android-release/bun` with `scripts/stage-android-compiler.py`. The [build-host runner](docs/android-compiler.md) executes it on macOS through Docker and on Linux through QEMU user mode, preserving every compatibility check without rebuilding Bun.
 
 ## Removed features
 
