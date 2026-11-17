@@ -40,6 +40,14 @@ Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux 
 
 `make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.py` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.py` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
 
+## Android runtime
+
+Build the ARM64 Android runtime on Linux with `scripts/bun-android-build.sh`, using Android NDK r27c through `ANDROID_NDK_ROOT` and the same LLVM release as the macOS build. After the objects exist, run `scripts/relink-android-embed.py`. It reuses those objects and the build system's expanded link command, producing `$BUN_ENGINE_WORK/embed-android/libbun.so` with only the embed calls and JavaScriptCore C API exported. The ELF load segments use 16 KB alignment. Later binding changes need only their affected objects rebuilt and this relink.
+
+Android uses WebKit's static ICU libraries and data from the Android build. The Apple CoreFoundation substitutions apply only to iOS. One reads the Android library at `android/arm64-v8a/libbun.so` and its JavaScriptCore C headers at `android/include/JavaScriptCore` under the engine directory.
+
+The Android runtime and its compiler must have matching revisions, built-in module text and JavaScriptCore layout facts. The macOS compiler does not accept the Android runtime merely because their revisions match. A native Android compiler from `build/android-release/bun` accepts it. Keep that native compiler validation distinct from build-host cross-compilation support.
+
 ## Removed features
 
 The runtime leaves out 128 of Bun's removable features: compiling and tooling, which `bun compile` removes from every program anyway, and Bun and Node APIs a React Native app cannot reach because it never imports them and Hermes lacks them too (servers, databases, processes, sockets, Node modules, WebAssembly, release diagnostics, the bundler and transpiler). `scripts/removed-features.txt` lists them. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` stay, since React Native's polyfills read every global they replace.
