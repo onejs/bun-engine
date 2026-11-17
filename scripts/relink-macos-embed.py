@@ -4,6 +4,8 @@
 from pathlib import Path
 import json, os, shutil, subprocess, sys
 import strip_features
+reuse_trim = '--reuse-trim' in sys.argv
+if reuse_trim: sys.argv.remove('--reuse-trim')
 root = Path(os.environ.get('BUN_ENGINE_WORK', Path.home() / '.cache/bun-engine'))
 build = root / 'bun-src/build/darwin-release'
 out = root / 'embed-macos'
@@ -49,11 +51,14 @@ else:
     features = json.loads((build / 'codegen/removable-features.json').read_text())
     for f in features['features']: f['minimumBytes'] = 0
     (trim / 'features.json').write_text(json.dumps(features))
-    subprocess.run([shutil.which('bun'), str(root / 'bun-src/scripts/build/trim/link.ts'), str(trim / 'trim-work'),
-                    str(trim / 'features.json'), str(build / 'codegen/builtin-uses.json'), '--demangler=' + str(llvm / 'llvm-cxxfilt'),
-                    '--', str(llvm / 'clang++'), '@' + str(out / 'inputs.rsp'), *flags, *lto,
-                    '-Wl,-cache_path_lto,' + str(trim / 'lto-cache'), *icu, '-Wl,-map,' + str(trim / 'libbun.map'),
-                    '-o', str(trim / 'libbun.dylib')], check=True)
+    if not reuse_trim:
+        subprocess.run([shutil.which('bun'), str(root / 'bun-src/scripts/build/trim/link.ts'), str(trim / 'trim-work'),
+                        str(trim / 'features.json'), str(build / 'codegen/builtin-uses.json'), '--demangler=' + str(llvm / 'llvm-cxxfilt'),
+                        '--', str(llvm / 'clang++'), '@' + str(out / 'inputs.rsp'), *flags, *lto,
+                        '-Wl,-cache_path_lto,' + str(trim / 'lto-cache'), *icu, '-Wl,-map,' + str(trim / 'libbun.map'),
+                        '-o', str(trim / 'libbun.dylib')], check=True)
+    if not reuse_trim or not (trim / 'entry-points.json').exists():
+        subprocess.run([shutil.which('bun'), str(Path(__file__).with_name('trim-entry-points.ts'))], check=True)
     objs = strip_features.stage(trim, llvm, set(removed), trim / 'strip')
     def native(p): return p.startswith('--') or open(p, 'rb').read(4) not in (b'BC\xc0\xde', b'\xde\xc0\x17\x0b')
     eager = [p for p in (out / 'inputs.rsp').read_text().split() if native(p)]
@@ -61,6 +66,6 @@ else:
     (trim / 'native.rsp').write_text('\n'.join(objs + eager + icu) + '\n')
     (trim / 'native-lazy.rsp').write_text('\n'.join(lazy) + '\n')
     native_flags = ['-Wl,@' + str(trim / 'native-lazy.rsp')] + flags[1:] + ['-Wl,--icf=safe']
-    subprocess.run([str(llvm / 'clang++'), '@' + str(trim / 'native.rsp'), *native_flags, '-o', str(dylib)], check=True)
+    subprocess.run([str(llvm / 'clang++'), '@' + str(trim / 'native.rsp'), *native_flags, '-Wl,-map,' + str(out / 'libbun.map'), '-o', str(dylib)], check=True)
     strip_features.mark_removed(dylib, trim / 'features.json', removed, llvm)
 subprocess.run([str(llvm / 'llvm-strip'), '-S', '-o', str(out / 'libbun-stripped.dylib'), str(dylib)], check=True)

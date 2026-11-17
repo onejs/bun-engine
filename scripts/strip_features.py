@@ -2,11 +2,25 @@
 # executable segments, which App Store validation rejects (ITMS 90999), so instead every reference to an entry
 # point of a removed feature is pointed at a trap, the objects are linked natively and -dead_strip drops what
 # only those entry points reached. the feature state then marks them removed, as bun compile does.
-import collections, json, os, re, struct, subprocess
-from pathlib import Path
+import collections, json, os, struct, subprocess
 
-ENTRY = re.compile(r"^(\S+) (\S+) (\d+) (.*) \((\S+), (\d+) bytes\)$")
-TRAP = ".text\n.globl _bun_removed_feature\n.p2align 14\n_bun_removed_feature:\n.rept 4096\nbrk #0xbad\n.endr\n"
+TRAP = """.text
+.subsections_via_symbols
+.globl _bun_removed_Abort
+.p2align 2
+_bun_removed_Abort:
+brk #0xbad
+.globl _bun_removed_ReturnDefault
+.p2align 2
+_bun_removed_ReturnDefault:
+mov x0, #0
+ret
+.globl _bun_removed_ReturnUndefined
+.p2align 2
+_bun_removed_ReturnUndefined:
+mov x0, #10
+ret
+"""
 
 
 class MachO:
@@ -66,52 +80,50 @@ class MachO:
         return count
 
 
-def entry_points(report, removed):
-    """object name -> demangled entry points of removed features, from the trim link's review"""
-    entries = collections.defaultdict(set)
-    for line in open(report / "entry-points.txt", errors="replace"):
-        m = ENTRY.match(line.rstrip("\n").rpartition(" <- ")[0])
-        if m and m.group(1) in removed:
-            entries[m.group(5)].add(m.group(4))
-    return entries
-
-
-def demangle(llvm, names):
-    r = subprocess.run([str(llvm / "llvm-cxxfilt"), "-n"], input="\n".join(n[1:] if n.startswith("_") else n for n in names),
-                       capture_output=True, text=True, check=True)
-    return r.stdout.split("\n")
-
-
 def stage(trim, llvm, removed, out):
     """writes <out>/objs: the trim link's compiled objects with references to removed entry points retargeted"""
     compiled = trim / "trim-work/compiled"
     objs = out / "objs"
     objs.mkdir(parents=True)
     objects = {p.name: MachO(p.read_bytes()) for p in compiled.glob("*.o")}
-    entries = entry_points(trim / "libbun.dylib.trim", removed)
-    global_entries, local_entries, missing = set(), collections.defaultdict(set), 0
-    for name, wanted in entries.items():
+    entries = json.loads((trim / "entry-points.json").read_text())
+    known = {f["name"] for f in json.loads((trim / "features.json").read_text())["features"]}
+    if removed - known: raise ValueError(f"unknown removed features: {sorted(removed - known)}")
+    global_entries, local_entries = {}, collections.defaultdict(dict)
+    kept = collections.defaultdict(set)
+    for entry in entries:
+        if entry["feature"] not in removed: kept[entry["object"]].update(entry["symbols"])
+    missing = set()
+    for entry in entries:
+        if entry["feature"] not in removed: continue
+        name = entry["object"]
         obj = objects.get(name)
-        if not obj: missing += len(wanted); continue
-        syms = list(obj.symbols())
-        found = set()
-        for (i, mangled, ntype), d in zip(syms, demangle(llvm, [s[1] for s in syms])):
-            if (ntype & 0x0e) != 0x0e or d not in wanted: continue
-            found.add(d)
-            if ntype & 0x01: global_entries.add(mangled)
-            else: local_entries[name].add(i)
-        missing += len(wanted - found)
+        if obj is None:
+            missing.add(name); continue
+        wanted = set(entry["symbols"]) - kept[name]
+        stub = entry["stub"] if entry["stub"] in ("ReturnDefault", "ReturnUndefined") else "Abort"
+        for i, mangled, ntype in obj.symbols():
+            if (ntype & 0x0e) != 0x0e or mangled not in wanted: continue
+            targets = global_entries if ntype & 0x01 else local_entries[name]
+            key = mangled if ntype & 0x01 else i
+            # a recoverable guard may share its entry point with an aborting guard
+            if targets.get(key, "Abort") == "Abort": targets[key] = stub
+    if missing: raise ValueError(f"entry point objects missing: {sorted(missing)}")
     edited = 0
     for name, obj in objects.items():
-        targets = set(local_entries.get(name, ())) | {i for i, mangled, _ in obj.symbols() if mangled in global_entries}
-        # the compiled objects are hard links into the lto cache, so edits go to new files only
-        if targets and obj.retarget(targets, obj.add_undefined("_bun_removed_feature")):
+        targets = dict(local_entries.get(name, {}))
+        targets.update({i: global_entries[mangled] for i, mangled, _ in obj.symbols() if mangled in global_entries})
+        count = 0
+        for stub in set(targets.values()):
+            selected = {i for i, kind in targets.items() if kind == stub}
+            count += obj.retarget(selected, obj.add_undefined("_bun_removed_" + stub))
+        if count:
             (objs / name).write_bytes(obj.b); edited += 1
         else:
             os.symlink((compiled / name).resolve(), objs / name)
     (out / "trap.s").write_text(TRAP)
     subprocess.run([str(llvm / "clang"), "--target=arm64-apple-macosx", "-c", str(out / "trap.s"), "-o", str(objs / "zz-trap.o")], check=True)
-    print(f"strip: {sum(map(len, entries.values()))} entry points, {missing} not found as symbols, {edited} objects edited")
+    print(f"strip: {len(global_entries) + sum(map(len, local_entries.values()))} exact entry points, {edited} objects edited")
     return sorted(str(p) for p in objs.iterdir())
 
 
