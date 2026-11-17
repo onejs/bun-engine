@@ -101,20 +101,23 @@ def stage(trim, llvm, removed, out):
         if obj is None:
             missing.add(name); continue
         wanted = set(entry["symbols"]) - kept[name]
+        found = set()
         stub = entry["stub"] if entry["stub"] in ("ReturnDefault", "ReturnUndefined") else "Abort"
         for i, mangled, ntype in obj.symbols():
             if (ntype & 0x0e) != 0x0e or mangled not in wanted: continue
+            found.add(mangled)
             targets = global_entries if ntype & 0x01 else local_entries[name]
             key = mangled if ntype & 0x01 else i
             # a recoverable guard may share its entry point with an aborting guard
             if targets.get(key, "Abort") == "Abort": targets[key] = stub
-    if missing: raise ValueError(f"entry point objects missing: {sorted(missing)}")
+        missing.update(name + ":" + symbol for symbol in wanted - found)
+    if missing: raise ValueError(f"entry points missing: {sorted(missing)}")
     edited = 0
     for name, obj in objects.items():
         targets = dict(local_entries.get(name, {}))
         targets.update({i: global_entries[mangled] for i, mangled, _ in obj.symbols() if mangled in global_entries})
         count = 0
-        for stub in set(targets.values()):
+        for stub in sorted(set(targets.values())):
             selected = {i for i, kind in targets.items() if kind == stub}
             count += obj.retarget(selected, obj.add_undefined("_bun_removed_" + stub))
         if count:

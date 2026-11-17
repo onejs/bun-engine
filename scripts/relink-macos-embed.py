@@ -58,7 +58,8 @@ else:
                         '-Wl,-cache_path_lto,' + str(trim / 'lto-cache'), *icu, '-Wl,-map,' + str(trim / 'libbun.map'),
                         '-o', str(trim / 'libbun.dylib')], check=True)
     if not reuse_trim or not (trim / 'entry-points.json').exists():
-        subprocess.run([shutil.which('bun'), str(Path(__file__).with_name('trim-entry-points.ts'))], check=True)
+        subprocess.run([shutil.which('bun'), str(Path(__file__).with_name('trim-entry-points.ts'))],
+                       env={**os.environ, 'BUN_ENGINE_WORK': str(root.resolve())}, check=True)
     objs = strip_features.stage(trim, llvm, set(removed), trim / 'strip')
     def native(p): return p.startswith('--') or open(p, 'rb').read(4) not in (b'BC\xc0\xde', b'\xde\xc0\x17\x0b')
     eager = [p for p in (out / 'inputs.rsp').read_text().split() if native(p)]

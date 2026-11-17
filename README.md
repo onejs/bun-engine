@@ -46,6 +46,8 @@ The runtime leaves out 128 of Bun's removable features: compiling and tooling, w
 
 Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `trim-entry-points.ts` reads Bun's trim graph and writes exact symbol records, including the required stub kind. The text review report truncates long C++ names and is unsuitable as linker input. `strip_features.py` retargets removed entry points to traps or default-return stubs and links the compiled objects natively with `-dead_strip`. Entry points shared with retained features, or folded with unmarked code, stay. The feature state marks removed features so their guards take the removed path.
 
+With the static object linked by Apple's linker and dead stripped to the embed and JSC exports, the runtime is 67.4 MB raw / 26.4 MB gzip, down from 92.5 MB / 33.4 MB in 0.2.1. ICU data is unchanged at 24.2 MB. B3 drops out and Wasm is down to 0.19 MB of shared runtime support.
+
 Potential Bun upstream hooks are a stable machine-readable entry-point export from the trim linker and an option to relink an existing trim graph. The scripts currently import the trim modules from the pinned Bun source. Built-in module sources remain in one data blob with compiled-in offsets; emitting them as separate linker atoms would allow unused Node module sources to disappear without rebuilding Bun.
 
 ## App Store
