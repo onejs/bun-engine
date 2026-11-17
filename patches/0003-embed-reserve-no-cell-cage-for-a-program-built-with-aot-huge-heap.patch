@@ -1,0 +1,185 @@
+From 732d8d052760694c9b6fb5778b162e3ba5951ad6 Mon Sep 17 00:00:00 2001
+From: natew <natew@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 08:50:10 +0000
+Subject: [PATCH] embed: reserve no cell cage for a program built with
+ --aot-huge-heap
+
+---
+ src/jsc/bindings/BunCompiledModules.cpp | 9 +++++++++
+ src/jsc/bindings/ZigGlobalObject.cpp    | 9 ++++++---
+ src/jsc/compiled_program.rs             | 6 ++++++
+ src/jsc/lib.rs                          | 4 ++++
+ src/runtime/cli/run_command.rs          | 2 ++
+ src/runtime/cli/run_compiled.rs         | 6 ++++++
+ src/runtime/cli/test_command.rs         | 1 +
+ 7 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/src/jsc/bindings/BunCompiledModules.cpp b/src/jsc/bindings/BunCompiledModules.cpp
+index 8e7ddd05ab..4415c374dc 100644
+--- a/src/jsc/bindings/BunCompiledModules.cpp
++++ b/src/jsc/bindings/BunCompiledModules.cpp
+@@ -2682,6 +2682,14 @@ extern "C" bool Bun__AOT__omitsFunctionSource(BunAOTBytes image)
+     return reinterpret_cast<const JSC::AOT::ImageHeader*>(bytes.data())->options.omitsFunctionSource;
+ }
+ 
++extern "C" bool Bun__AOT__usesWideReferences(BunAOTBytes image)
++{
++    std::span<const uint8_t> bytes { image.ptr, image.len };
++    if (!JSC::AOT::Image::flags(bytes))
++        return false;
++    return reinterpret_cast<const JSC::AOT::ImageHeader*>(bytes.data())->options.useWideReferences();
++}
++
+ extern "C" bool Bun__AOT__tryReservePagesForNewThread(void** pages, bool threadsAreEnding)
+ {
+     JSC::AOT::PagesForNewThread result = JSC::AOT::tryReservePagesForNewThread(threadsAreEnding);
+@@ -2847,6 +2855,7 @@ extern "C" bool Bun__isCompiledProgramFileInSomeForm(const BunString*) { return
+ extern "C" bool Bun__AOT__mayHoldPathStartingWith(BunAOTBytes) { return false; }
+ extern "C" bool Bun__AOT__isLeftToCodeOutsideImage(const BunString*, const BunString*) { return false; }
+ extern "C" bool Bun__AOT__omitsFunctionSource(BunAOTBytes) { return false; }
++extern "C" bool Bun__AOT__usesWideReferences(BunAOTBytes) { return false; }
+ extern "C" bool Bun__AOT__tryReservePagesForNewThread(void** pages, bool)
+ {
+     *pages = nullptr;
+diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
+index 2c69e17f52..971a25a113 100644
+--- a/src/jsc/bindings/ZigGlobalObject.cpp
++++ b/src/jsc/bindings/ZigGlobalObject.cpp
+@@ -354,11 +354,11 @@ extern "C" bool Bun__isOptionThatCompiledCodeDoesNotTake(const char* entry)
+ }
+ #endif
+ 
+-extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(const char* ptr, size_t length), bool evalMode, bool oneShotStartup, bool shortLivedGlobals, bool runsCompiledCode, bool locksBuiltins, bool isCompiler)
++extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(const char* ptr, size_t length), bool evalMode, bool oneShotStartup, bool shortLivedGlobals, bool runsCompiledCode, bool runsWideProgram, bool locksBuiltins, bool isCompiler)
+ {
+     static std::once_flag jsc_init_flag;
+     // NOLINTBEGIN
+-    std::call_once(jsc_init_flag, [evalMode, oneShotStartup, shortLivedGlobals, runsCompiledCode, locksBuiltins, isCompiler, envp, envc, onCrash]() {
++    std::call_once(jsc_init_flag, [evalMode, oneShotStartup, shortLivedGlobals, runsCompiledCode, runsWideProgram, locksBuiltins, isCompiler, envp, envc, onCrash]() {
+         locksBuiltinsWithoutImage = locksBuiltins;
+         if (locksBuiltins)
+             JSC::AOT::lockBuiltinsWithoutImage();
+@@ -486,6 +486,9 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
+                     }
+                 }
+             }
++            // after the loop: jsc reserves the cage for any nonzero size, and a program built with --aot-huge-heap never uses it
++            if (runsWideProgram)
++                JSC::Options::markedBlockCageSizeInMB() = 0;
+             if (const char8_t* directory = JSC::Options::samplingProfilerPath()) {
+                 s_samplingProfilerDirectory = directory;
+                 JSC::Options::samplingProfilerPath() = nullptr;
+@@ -523,7 +526,7 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
+             }
+             JSC::Options::assertOptionsAreCoherent();
+         }); // end JSC::initialize lambda
+-        if (runsCompiledCode)
++        if (runsCompiledCode && !runsWideProgram)
+             Bun::initializeCellCage();
+ 
+ #if OS(WINDOWS) && (CPU(X86_64) || CPU(ARM64))
+diff --git a/src/jsc/compiled_program.rs b/src/jsc/compiled_program.rs
+index bf2f8efdd8..e6a5a6f006 100644
+--- a/src/jsc/compiled_program.rs
++++ b/src/jsc/compiled_program.rs
+@@ -45,6 +45,7 @@ unsafe extern "C" {
+     safe fn Bun__AOT__loadsCodeOutsideImage(image: FfiSlice<'_>) -> bool;
+     /// Not `safe fn`: past the header check it reads a C++ `bool` from the bytes unvalidated.
+     fn Bun__AOT__omitsFunctionSource(image: FfiSlice<'_>) -> bool;
++    safe fn Bun__AOT__usesWideReferences(image: FfiSlice<'_>) -> bool;
+     fn Bun__AOT__useNoImageOnThisThread(specifier: FfiSlice<'_>) -> bool;
+     safe fn Bun__AOT__imageCode() -> Bytes;
+     safe fn Bun__AOT__takePagesForTablesOfFirstThread();
+@@ -323,6 +324,11 @@ pub fn omits_function_source(program: &CompiledProgram) -> bool {
+     unsafe { Bun__AOT__omitsFunctionSource(image_of(program)) }
+ }
+ 
++/// Whether the program was built with `--aot-huge-heap`. `false` for an image `use_image` refuses.
++pub fn uses_wide_references(program: &CompiledProgram) -> bool {
++    Bun__AOT__usesWideReferences(image_of(program))
++}
++
+ /// Whether this executable can run a module of Bun's library that the program does not use.
+ pub fn can_load_unused_library_modules() -> bool {
+     if !bun_removable_features::RuntimeRequirement::WholeRuntime.is_available() {
+diff --git a/src/jsc/lib.rs b/src/jsc/lib.rs
+index ee583bdd1c..b0178d0a56 100644
+--- a/src/jsc/lib.rs
++++ b/src/jsc/lib.rs
+@@ -494,6 +494,8 @@ pub struct InitializeOptions {
+     /// `bun test --isolate`/`--parallel`: each file gets a fresh global and per-global JIT code is discarded with it.
+     pub short_lived_globals: bool,
+     pub runs_compiled_code: bool,
++    /// The compiled program was built with `--aot-huge-heap`, so no address space is reserved for a cage around its heap.
++    pub runs_wide_program: bool,
+     pub locks_builtins: bool,
+     /// This process is `bun compile`: a release build of Bun takes no B3, Air or macro assembler option from `BUN_JSC_*`.
+     pub is_compiler: bool,
+@@ -520,6 +522,7 @@ pub fn initialize(options: InitializeOptions) {
+             options.one_shot,
+             options.short_lived_globals,
+             options.runs_compiled_code,
++            options.runs_wide_program,
+             options.locks_builtins,
+             options.is_compiler,
+         )
+@@ -1453,6 +1456,7 @@ unsafe extern "C" {
+         one_shot_startup: bool,
+         short_lived_globals: bool,
+         runs_compiled_code: bool,
++        runs_wide_program: bool,
+         locks_builtins: bool,
+         is_compiler: bool,
+     );
+diff --git a/src/runtime/cli/run_command.rs b/src/runtime/cli/run_command.rs
+index 9e4c87f8b3..2cd8cef6c9 100644
+--- a/src/runtime/cli/run_command.rs
++++ b/src/runtime/cli/run_command.rs
+@@ -1039,6 +1039,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+             eval_mode: ctx.runtime_options.eval.eval_and_print,
+             one_shot: bun_jsc::is_one_shot_eval_invocation(),
+             runs_compiled_code: crate::cli::run_compiled::runs_compiled_code(),
++            runs_wide_program: crate::cli::run_compiled::runs_wide_program(),
+             locks_builtins: crate::cli::run_compiled::is_checked(),
+             ..Default::default()
+         });
+@@ -1238,6 +1239,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         // argv belongs to the compiled program, so a `-e` or `-p` in it is not ours.
+         bun_jsc::initialize(bun_jsc::InitializeOptions {
+             runs_compiled_code,
++            runs_wide_program: program.is_some_and(bun_jsc::compiled_program::uses_wide_references),
+             ..Default::default()
+         });
+         bun_analytics::features::standalone_executable.fetch_add(1, Ordering::Relaxed);
+diff --git a/src/runtime/cli/run_compiled.rs b/src/runtime/cli/run_compiled.rs
+index 755b2a7d42..8cd8ad90cb 100644
+--- a/src/runtime/cli/run_compiled.rs
++++ b/src/runtime/cli/run_compiled.rs
+@@ -1263,6 +1263,12 @@ pub(crate) fn runs_compiled_code() -> bool {
+     IS_FROM_DESCRIPTOR.load(Ordering::Relaxed)
+ }
+ 
++pub(crate) fn runs_wide_program() -> bool {
++    graph()
++        .and_then(|graph| graph.compiled_program())
++        .is_some_and(bun_jsc::compiled_program::uses_wide_references)
++}
++
+ /// `--isolate=modules`: a module graph for each test file in one global object, whose properties are put back between files. What puts them back is a
+ /// module of Bun's own code that the runner loads for itself. A compiled program holds what its files name and refuses the text of the rest: there
+ /// each file gets a global object of its own, as under `--isolate`.
+diff --git a/src/runtime/cli/test_command.rs b/src/runtime/cli/test_command.rs
+index 748231b20b..00bcba039d 100644
+--- a/src/runtime/cli/test_command.rs
++++ b/src/runtime/cli/test_command.rs
+@@ -2740,6 +2740,7 @@ impl TestCommand {
+             short_lived_globals: ctx.test_options.isolate
+                 && !run_compiled::test_files_share_global(ctx),
+             runs_compiled_code: run_compiled::runs_compiled_code(),
++            runs_wide_program: run_compiled::runs_wide_program(),
+             locks_builtins: run_compiled::is_checked(),
+             ..Default::default()
+         });
+-- 
+2.53.0
+

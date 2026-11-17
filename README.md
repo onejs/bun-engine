@@ -12,30 +12,33 @@ This repo holds what is needed to build the engine: the Bun commit it builds fro
 
 ```
 bun-engine/
-  bun                                  macOS arm64 compiler, run by the release build
-  ios/iphoneos/Bun.framework           the runtime for devices
-  ios/iphoneos/BunCompat.framework     SDK gaps, and the compiled program at build time
-  ios/iphonesimulator/...              the same for the simulator
+  bun                             macOS arm64 compiler, run by the release build
+  ios/iphoneos/BunEngine.o        the runtime for devices, one prelinked object
+  ios/iphonesimulator/BunEngine.o the same for the simulator
+  ios/BunEngine.tbd               the runtime's exports, for debug builds that ship no runtime
   VERSION
 ```
 
-An image from `bun compile` only loads in the runtime it was compiled against, so the compiler and the frameworks of one release always go together.
+The app executable links `BunEngine.o` statically, so no Bun image loads before `main`. An image from `bun compile` only loads in the runtime it was compiled against, so the compiler and the objects of one release always go together. A program is bound to its runtime by the stamp and identity (the executable's `LC_UUID`) in its image header and holds no runtime addresses, so One compiles it against a template executable before the app links and writes the app's identity into it after.
 
 Compiled code normally treats built-in objects as read-only. React Native apps replace some of their members through polyfills, as FormatJS does with `Number.prototype.toLocaleString`, so One compiles with `BUN_AOT_REPLACE_WRITTEN=1`: every built-in member the program can be seen writing, including through a helper that receives the object, stays replaceable.
 
+One compiles device programs with `--aot-huge-heap`, whose references reach any address. The runtime reserves its 32 GB heap cage only for a program compiled without it (One's simulator builds), so a device app needs no extended virtual addressing for its heap.
+
 ## Building
 
-The runtime is Bun's macOS configuration, cross-built on Linux and relinked as a dylib that exports the embed calls and the JavaScriptCore C API, then retagged for iOS on a Mac. Keeping the macOS configuration keeps the runtime facts equal to the macOS compiler's, so the Mac's `bun compile` produces images the iOS runtime loads.
+The runtime is Bun's macOS configuration, cross-built on Linux, then prelinked on a Mac into one object that exports the embed calls and the JavaScriptCore C API, retagged for iOS. Keeping the macOS configuration keeps the runtime facts equal to the macOS compiler's, so the Mac's `bun compile` produces images the iOS runtime loads.
 
 Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux steps need `bun`, `cargo`, `ninja`, `cmake` and `BUN_TOOLCHAIN_LLVM` pointing at the LLVM release Bun pins (23.1.5 at this commit), which includes `ld64.lld`.
 
 1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. Its data leaves out converters, transliteration, spoof checking and stringprep, which the runtime links no code for. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
-4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the runtime, without the features React Native cannot reach (below). Add `--reuse-trim` when changing only the removal list: it reuses the existing trim analysis and compiled objects and takes about 12 seconds, with no Bun rebuild or LTO. Rerun without that flag after changing source or build inputs. Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
-5. `scripts/package.sh <libbun.dylib> <bun> <version>` (Mac): runs `make-frameworks.sh` for device and simulator and writes the release tarball.
+4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Add `--reuse-trim` when changing only the removal list: it reuses the existing trim analysis and compiled objects and takes about 12 seconds, with no Bun rebuild or LTO. Rerun without that flag after changing source or build inputs. Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
+5. `scripts/stage-inputs.sh` (Linux): stages the native objects of step 4's link, without debug info, in `$BUN_ENGINE_WORK/stage.tar.zst`. Copy it to the Mac and unpack it.
+6. `scripts/package.sh <stage> <bun> <version>` (Mac): runs `make-static.sh` and writes the release tarball.
 
-`make-frameworks.sh` retags the dylib for iOS (`dylib-template.py`), points the symbols the iOS SDK lacks at BunCompat (`patch-imports.py`, `ios-compat.c`) and adds the `LC_ENCRYPTION_INFO_64` command App Store validation requires (`encryption-info.py`). The runtime links with a header pad so its code starts at offset 0x4000, where Apple's linker puts it.
+`make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.py` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.py` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
 
 ## Removed features
 
@@ -49,8 +52,7 @@ Potential Bun upstream hooks are a stable machine-readable entry-point export fr
 
 Team Machine shipped to TestFlight on this engine. Validation and processing require:
 
-- One executable segment per binary (ITMS 90999). One's build links the compiled program into `BunCompat.framework` as `__TEXT,__bun` instead of `bun compile`'s `__BUN` segment.
-- `LC_ENCRYPTION_INFO_64` with Apple's extents (90125, 90180).
+- One executable segment per binary (ITMS 90999). One's build links the compiled program into the app executable as `__TEXT,__bun` instead of `bun compile`'s `__BUN` segment.
 - No system ICU (90338).
 
 ## Licenses
