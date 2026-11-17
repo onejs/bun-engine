@@ -1,3 +1,4 @@
+__asm__(".linker_option \"-framework\", \"CoreFoundation\"");
 // what the iOS SDK lacks for a runtime built against macOS. it links into the app
 // executable, which holds the compiled program in __TEXT,__bun
 #include <TargetConditionals.h>

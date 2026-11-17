@@ -34,7 +34,7 @@ Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux 
 1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. iOS apps may not link the system `libicucore` (ITMS 90338), so the runtime carries its own, kept small two ways. Its data is built from source through `scripts/icu-filter.json`, which leaves out what JavaScript cannot reach: converters, transliteration, rule-based number formats, units outside ECMA-402's sanctioned list, grammatical case and gender, exemplar cities and the like. Collation is compiled out, and `scripts/icu-foundation/` answers JavaScriptCore's collation and display-name calls from CoreFoundation under ICU's names. That takes ICU's data from 24 MB to under 10 MB. Copy `icu/out/lib/libicu{-foundation,i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
-4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Add `--reuse-trim` when changing only the removal list: it reuses the existing trim analysis and compiled objects and takes about 12 seconds, with no Bun rebuild or LTO. Rerun without that flag after changing source or build inputs. Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
+4. `scripts/relink-macos-embed.py --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Add `--reuse-trim` when changing only the removal list: it reuses the existing trim analysis and compiled objects and relinks natively with no Bun rebuild or LTO. Rerun without that flag after changing compiled Bun objects. Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
 5. `scripts/stage-inputs.sh` (Linux): stages the native objects of step 4's link, without debug info, in `$BUN_ENGINE_WORK/stage.tar.zst`. Copy it to the Mac and unpack it.
 6. `scripts/package.sh <stage> <bun> <version>` (Mac): runs `make-static.sh` and writes the release tarball.
 
@@ -46,15 +46,24 @@ The runtime leaves out 128 of Bun's removable features: compiling and tooling, w
 
 Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `trim-entry-points.ts` reads Bun's trim graph and writes exact symbol records, including the required stub kind. The text review report truncates long C++ names and is unsuitable as linker input. `strip_features.py` retargets removed entry points to traps or default-return stubs and links the compiled objects natively with `-dead_strip`. Entry points shared with retained features, or folded with unmarked code, stay. The feature state marks removed features so their guards take the removed path.
 
-With the static object linked by Apple's linker and dead stripped to the embed and JSC exports, the runtime is 67.4 MB raw / 26.4 MB gzip, down from 92.5 MB / 33.4 MB in 0.2.1. ICU data is unchanged at 24.2 MB. B3 drops out and Wasm is down to 0.19 MB of shared runtime support.
+With the static object linked by Apple's linker and dead stripped to the embed and JSC exports (decimal MB):
 
-Potential Bun upstream hooks are a stable machine-readable entry-point export from the trim linker and an option to relink an existing trim graph. The scripts currently import the trim modules from the pinned Bun source. Built-in module sources remain in one data blob with compiled-in offsets; emitting them as separate linker atoms would allow unused Node module sources to disappear without rebuilding Bun.
+| Runtime | Raw | Gzip |
+| --- | ---: | ---: |
+| 0.2.1 | 92.5 MB | 33.4 MB |
+| Exact removal records and 128 features, original ICU | 67.4 MB | 26.4 MB |
+| With filtered ICU and CoreFoundation | 52.6 MB | 20.0 MB |
+
+B3 drops out and Wasm is down to 0.19 MB of shared runtime support.
+
+Potential Bun upstream hooks are a stable machine-readable entry-point export from the trim linker and an option to relink an existing trim graph. The scripts currently import the trim modules from the pinned Bun source. Built-in module sources remain in one data blob with compiled-in offsets; emitting them through separate symbol references would let the linker drop unused Node module sources without rebuilding Bun.
 
 ## App Store
 
 Team Machine shipped to TestFlight on this engine. Validation and processing require:
 
 - One executable segment per binary (ITMS 90999). One's build links the compiled program into the app executable as `__TEXT,__bun` instead of `bun compile`'s `__BUN` segment.
+- `LC_ENCRYPTION_INFO_64` with Apple's extents, supplied by the device app link.
 - No system ICU (90338).
 
 ## Licenses
