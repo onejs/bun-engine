@@ -16,6 +16,8 @@ void bun_embed_set_wakeup(void (*callback)(void*), void* user);
 /* milliseconds until the next timer, zero for ready tasks, nan when idle.
    query on the js thread; it neither fires timers nor invokes javascript. */
 double bun_embed_next_timeout(void);
+/* reclaim free allocator pages on the idle JS thread. */
+void bun_embed_collect_idle(void);
 #ifdef __cplusplus
 }
 #endif

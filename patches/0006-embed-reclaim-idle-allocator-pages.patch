@@ -1,0 +1,14 @@
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+index a3ab3f7..9c87402 100644
+--- a/src/runtime/bin_entry/embed.rs
++++ b/src/runtime/bin_entry/embed.rs
+@@ -177,3 +177,9 @@ pub(crate) unsafe extern "C" fn bun_embed_next_timeout() -> f64 {
+     }
+     crate::jsc_hooks::timer_all().next_timeout_ms()
+ }
++
++/// Reclaims free allocator pages after the host's JS thread goes idle.
++#[unsafe(no_mangle)]
++pub(crate) extern "C" fn bun_embed_collect_idle() {
++    bun_alloc::mimalloc::mi_on_thread_idle();
++}
