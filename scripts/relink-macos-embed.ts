@@ -39,8 +39,8 @@ const link = ninja
   .find((line) => line.startsWith("build bun-profile |"));
 if (!link) throw new Error("missing runtime link");
 const inputs = link
-  .split(": link ")[1]
-  .split(" | ")[0]
+  .split(/:\s+link\s+/)[1]
+  .split(/\s+\|\|?\s+/)[0]
   .trim()
   .split(/\s+/)
   .map((path) => resolve(build, path));

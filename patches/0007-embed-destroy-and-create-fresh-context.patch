@@ -1,0 +1,219 @@
+diff --git a/src/jsc/VirtualMachine.rs b/src/jsc/VirtualMachine.rs
+index a1b81db..456e257 100644
+--- a/src/jsc/VirtualMachine.rs
++++ b/src/jsc/VirtualMachine.rs
+@@ -2358,6 +2358,29 @@ impl VirtualMachine {
+         exit_code
+     }
+ 
++    /// Finish an embedded evaluation while preserving the process-wide HTTP thread.
++    ///
++    /// # Safety
++    /// On the owning thread after the host detached all callbacks and references.
++    /// The caller forbade script and holds the JSC API lock that teardown consumes.
++    pub unsafe fn destroy_embedded() {
++        let this = Self::get_mut_ptr();
++        unsafe {
++            (*this).is_shutting_down.set(true);
++            (*this).run_cleanup_hooks();
++            Self::teardown(this, Teardown::Worker);
++            MAIN_THREAD_VM.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
++            VMHolder::set_cached_global_object(None);
++            VMHolder::set_vm(None);
++            let console = core::mem::replace(&mut (*this).console, core::ptr::null_mut());
++            if !console.is_null() {
++                bun_core::heap::destroy(console);
++            }
++            // The embedder's log is process-static, unlike the worker's.
++            std::alloc::dealloc(this.cast::<u8>(), core::alloc::Layout::new::<Self>());
++        }
++    }
++
+     /// Checkpoint + close the sqlite connections *this* VM opened, while it is
+     /// alive and no user script will touch them again. Never another VM's: a
+     /// worker still running when the main thread exits without joining it owns
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+index 9c87402..b246455 100644
+--- a/src/runtime/bin_entry/embed.rs
++++ b/src/runtime/bin_entry/embed.rs
+@@ -54,7 +54,7 @@ fn tick(vm: &VirtualMachine) {
+ }
+ 
+ fn embedded() -> (&'static VirtualMachine, &'static [u8]) {
+-    // SAFETY: written once by `bun_embed_create` on the JS thread, read only there.
++    // SAFETY: the owning thread writes only while no callback can enter this VM.
+     unsafe { (*EMBEDDED.get()).expect("bun_embed_create was not called") }
+ }
+ 
+@@ -63,9 +63,15 @@ fn embedded() -> (&'static VirtualMachine, &'static [u8]) {
+ ///
+ /// # Safety
+ /// `argv` must hold `argc` NUL-terminated strings that live for the process.
+-/// Call once per process.
++/// Call on one thread, after destroying any earlier context.
+ #[unsafe(no_mangle)]
+ pub(crate) unsafe extern "C" fn bun_embed_create(argc: c_int, argv: *const *const c_char) -> *mut c_void {
++    let thread = std::thread::current().id();
++    let first = JS_THREAD.get().is_none();
++    assert_eq!(JS_THREAD.get_or_init(|| thread), &thread);
++    // SAFETY: the owner is the only writer and no context has been returned yet.
++    assert!(unsafe { (*EMBEDDED.get()).is_none() });
++    if first {
+     #[cfg(any(target_os = "android", all(target_os = "linux", not(target_env = "gnu"))))]
+     {
+         unsafe extern "C" {
+@@ -77,9 +83,10 @@ pub(crate) unsafe extern "C" fn bun_embed_create(argc: c_int, argv: *const *cons
+     bun_crash_handler::init();
+     super::use_mimalloc_in_dependencies();
+     bun_core::output::stdio::init();
++    }
+     bun_core::StackCheck::configure_thread();
+ 
+-    let Some((vm, entry)) = crate::cli::Cli::embed_start() else {
++    let Some((vm, entry)) = crate::cli::Cli::embed_start(first) else {
+         bun_core::output::flush();
+         return core::ptr::null_mut();
+     };
+@@ -87,13 +94,32 @@ pub(crate) unsafe extern "C" fn bun_embed_create(argc: c_int, argv: *const *cons
+         let _lock = vm.global().vm().get_api_lock();
+         unsafe { BunEmbed__delayMicrotasks(jsc_vm(vm)) };
+     }
+-    let _ = JS_THREAD.set(std::thread::current().id());
+-    // SAFETY: first and only write, on the JS thread.
++    // SAFETY: the JS thread publishes after installing the new context.
+     unsafe { *EMBEDDED.get() = Some((vm, entry)) };
+     // A `JSGlobalContextRef` is the `JSGlobalObject` pointer (JSC's APICast.h).
+     std::ptr::from_ref(vm.global()).cast_mut().cast()
+ }
+ 
++/// Releases the current context; the process and compiled program remain loaded.
++///
++/// # Safety
++/// On its creating thread, outside JS. Native callbacks must be detached and
++/// all host references to the context and its JS objects must be released.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_destroy() {
++    assert_eq!(JS_THREAD.get(), Some(&std::thread::current().id()));
++    #[cfg(target_os = "macos")]
++    unsafe { BunEmbed__setWakeup(-1, None, core::ptr::null_mut()) };
++    let (vm, _) = unsafe { (*EMBEDDED.get()).take().expect("no embedded VM to destroy") };
++    let lock = vm.global().vm().get_api_lock();
++    vm.forbid_script();
++    unsafe { BunEmbed__undelayMicrotasks() };
++    // The teardown consumes the lock's reference to the old JSC VM.
++    core::mem::forget(lock);
++    unsafe { VirtualMachine::destroy_embedded() };
++    unsafe { crate::cli::Cli::embed_reset() };
++}
++
+ /// Runs the compiled entry module. Returns 0 on success. On a thrown error it
+ /// returns 1 and writes the thrown value (a `JSValueRef`) to `exception`; on a
+ /// load failure it returns 2 after printing the reason.
+diff --git a/src/runtime/cli/mod.rs b/src/runtime/cli/mod.rs
+index 1fa86c7..a6fce27 100644
+--- a/src/runtime/cli/mod.rs
++++ b/src/runtime/cli/mod.rs
+@@ -404,14 +404,16 @@ pub(crate) mod cli {
+ 
+     /// `start` for an embedder: the same process setup, then the embedded
+     /// program's VM on the calling thread with its entry not yet run.
+-    pub(crate) fn embed_start(
++    pub(crate) fn embed_start(first: bool
+     ) -> Option<(&'static bun_jsc::virtual_machine::VirtualMachine, &'static [u8])> {
+-        bun_crash_handler::cli_state::set_main_thread_id(bun_threading::current_thread_id());
+-        bun_core::set_start_time(bun_core::time::nano_timestamp());
+-        // SAFETY: called once, before any other thread touches `LOG_` or the arena.
++        if first {
++            bun_crash_handler::cli_state::set_main_thread_id(bun_threading::current_thread_id());
++            bun_core::set_start_time(bun_core::time::nano_timestamp());
++            unsafe { (*super::CLI_ARENA.get()).write(bun_alloc::Arena::new()) };
++        }
++        // The previous VM's log was dropped after its teardown.
+         let log = unsafe { (*LOG_.get()).write(bun_ast::Log::init()) };
+-        unsafe { (*super::CLI_ARENA.get()).write(bun_alloc::Arena::new()) };
+-        match Command::embed_boot(log) {
++        match Command::embed_boot(log, first) {
+             Ok(booted) => booted,
+             Err(err) => {
+                 let _ = log.print(std::ptr::from_mut::<bun_core::io::Writer>(
+@@ -422,6 +424,14 @@ pub(crate) mod cli {
+             }
+         }
+     }
++
++    pub(crate) unsafe fn embed_reset() {
++        // The VM, its workers and outstanding jobs can no longer use the CLI log.
++        unsafe {
++            Command::embed_reset();
++            (*LOG_.get()).assume_init_drop();
++        }
++    }
+ }
+ pub(crate) use cli as Cli;
+ 
+@@ -1249,12 +1259,17 @@ pub(crate) mod command {
+     /// `None` when this image holds no compiled program.
+     pub(crate) fn embed_boot(
+         log: &mut bun_ast::Log,
++        first: bool,
+     ) -> crate::Result<Option<(&'static bun_jsc::virtual_machine::VirtualMachine, &'static [u8])>> {
+         let Some(graph) = bun_standalone_graph::Graph::from_executable()? else {
+             return Ok(None);
+         };
+         let (ctx, entry_name, graph) = standalone_context(graph, log)?;
+-        Ok(Some(super::run_command::RunCommand::boot_standalone_vm(ctx, entry_name, graph)?))
++        Ok(Some(super::run_command::RunCommand::boot_standalone_vm(ctx, entry_name, graph, first)?))
++    }
++
++    pub(crate) unsafe fn embed_reset() {
++        unsafe { (*CONTEXT_DATA.get()).assume_init_drop() };
+     }
+ 
+     fn standalone_context(
+diff --git a/src/runtime/cli/run_command.rs b/src/runtime/cli/run_command.rs
+index 2cd8cef..4bba34c 100644
+--- a/src/runtime/cli/run_command.rs
++++ b/src/runtime/cli/run_command.rs
+@@ -1214,7 +1214,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         entry_path: Box<[u8]>,
+         graph: &'static bun_standalone_graph::Graph,
+     ) -> crate::Result<()> {
+-        let (vm, entry) = Self::boot_standalone_vm(ctx, entry_path, graph)?;
++        let (vm, entry) = Self::boot_standalone_vm(ctx, entry_path, graph, true)?;
+         Run {
+             ctx,
+             vm,
+@@ -1230,6 +1230,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         ctx: &mut ContextData,
+         entry_path: Box<[u8]>,
+         graph: &'static bun_standalone_graph::Graph,
++        first: bool,
+     ) -> crate::Result<(&'static VirtualMachine, &'static [u8])> {
+         use bun_standalone_graph::StandaloneModuleGraph::Flags as GraphFlags;
+ 
+@@ -1237,6 +1238,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         let program = bun_resolver::StandaloneModuleGraph::compiled_program(graph);
+         let runs_compiled_code = program.is_some();
+         // argv belongs to the compiled program, so a `-e` or `-p` in it is not ours.
++        if first {
+         bun_jsc::initialize(bun_jsc::InitializeOptions {
+             runs_compiled_code,
+             runs_wide_program: program.is_some_and(bun_jsc::compiled_program::uses_wide_references),
+@@ -1247,6 +1249,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+             bun_analytics::features::cross_compiled_bytecode.fetch_add(1, Ordering::Relaxed);
+         }
+         bun_ast::initialize_store();
++        }
+ 
+         // Load bunfig.toml unless disabled by compile flags. Config loading
+         // with execArgv is handled earlier in `Command::start` via `init()`.
+@@ -1286,7 +1289,8 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         // `vm.main` is a BACKREF (`*const [u8]`) into `entry_path`'s heap
+         // buffer and the runner never returns, so the allocation is
+         // process-lifetime by construction.
+-        let entry: &'static [u8] = Box::leak(entry_path);
++        static ENTRY: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
++        let entry = ENTRY.get_or_init(|| entry_path).as_ref();
+         vm.set_main(Some(entry));
+ 
+         let defines_ok = vm.transpiler.with_mut(|b| {

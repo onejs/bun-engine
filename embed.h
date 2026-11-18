@@ -5,6 +5,9 @@
 extern "C" {
 #endif
 JSGlobalContextRef bun_embed_create(int argc, const char* const* argv);
+/* detach callbacks and release host context references before destroying on its owning thread. */
+void bun_embed_destroy(void);
+
 int bun_embed_run_entry(JSValueRef* exception);
 void bun_embed_tick(void);
 /* host callbacks reenter the vm before allocating through the typed-array api. */
