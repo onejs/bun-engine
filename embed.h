@@ -18,6 +18,8 @@ void bun_embed_set_wakeup(void (*callback)(void*), void* user);
 double bun_embed_next_timeout(void);
 /* reclaim free allocator pages on the idle JS thread. */
 void bun_embed_collect_idle(void);
+/* synchronously collect the JS heap and reclaim free pages on the JS thread. */
+void bun_embed_collect_full(void);
 #ifdef __cplusplus
 }
 #endif
