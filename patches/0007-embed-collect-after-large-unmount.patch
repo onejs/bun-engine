@@ -1,0 +1,19 @@
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+--- a/src/runtime/bin_entry/embed.rs
++++ b/src/runtime/bin_entry/embed.rs
+@@ -183,3 +183,15 @@
+ pub(crate) extern "C" fn bun_embed_collect_idle() {
+     bun_alloc::mimalloc::mi_on_thread_idle();
+ }
++
++/// Collects unreachable JS cells and returns freed allocator pages to the OS.
++///
++/// # Safety
++/// Call after create, on the JS thread.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_collect_full() {
++    assert_eq!(JS_THREAD.get(), Some(&std::thread::current().id()));
++    let vm = embedded().0;
++    let _lock = vm.global().vm().get_api_lock();
++    vm.garbage_collect_from_js(true);
++}
