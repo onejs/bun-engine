@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: natew <natew@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 19:30:00 -0800
+Subject: [PATCH] runtime: load a built-in module from its text with the
+ interpreter
+
+Running a built-in module from its text takes the parser and interpreter,
+not the transpiler, so an executable that keeps the interpreter but removes
+RuntimeTranspiler can still load a built-in module its compiled image lacks.
+---
+ src/jsc/bindings/InternalModuleRegistry.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/jsc/bindings/InternalModuleRegistry.cpp b/src/jsc/bindings/InternalModuleRegistry.cpp
+index 17956f5b0..85a04adc0 100644
+--- a/src/jsc/bindings/InternalModuleRegistry.cpp
++++ b/src/jsc/bindings/InternalModuleRegistry.cpp
+@@ -310,11 +310,11 @@ JSC::JSValue generateInternalModule(JSC::JSGlobalObject* globalObject, JSC::VM&
+         return {};
+     }
+ #endif
+-    if (JSC::isFeatureRemoved(Bun::Feature::RuntimeTranspiler)) [[unlikely]] {
+-        throwRemovedModuleError(globalObject, Bun::Feature::RuntimeTranspiler, id);
++    if (JSC::isFeatureRemoved(Bun::Feature::Interpreter)) [[unlikely]] {
++        throwRemovedModuleError(globalObject, Bun::Feature::Interpreter, id);
+         return {};
+     }
+-    return JSC::callRemovable<Bun::Feature::RuntimeTranspiler, JSC::RemovedFeatureStub::Abort, generateInternalModuleFromText>(globalObject, vm, id);
++    return JSC::callRemovable<Bun::Feature::Interpreter, JSC::RemovedFeatureStub::Abort, generateInternalModuleFromText>(globalObject, vm, id);
+ }
+ 
+ // Accepts both generator signatures (BUN_FOREACH_ESM_NATIVE_MODULE and BUN_FOREACH_LAZY_ESM_NATIVE_MODULE);
+-- 
+2.47.0
+
