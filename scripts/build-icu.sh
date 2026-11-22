@@ -54,8 +54,13 @@ rm common/udata.ao
 make -C common CXXFLAGS="$flags -std=c++17 -DBUN_ICU_COMPRESSED_DATA" udata.ao > patched-udata.log
 lib="$icu/out/lib"
 ar rcs "$lib/libicuuc.a" common/udata.ao
-bun "$scratch/compress-data.ts" "$src/data/in/icudt74l.dat" "$lib/libicudata.a" \
-  --icupkg "$icu/build/bin/icupkg" --skip "$icu/dl/keep-raw.txt" --level 15 \
+data="$src/data/in/icudt74l.dat"
+icupkg="$icu/build/bin/icupkg"
+# the embedded engine links no ICU legacy converters or transliterators
+"$icupkg" -l "$data" | awk '/[.]cnv$/ || /^translit\//' > "$scratch/unused-data.txt"
+"$icupkg" -r "$scratch/unused-data.txt" "$data" "$scratch/icudt74l.dat"
+bun "$scratch/compress-data.ts" "$scratch/icudt74l.dat" "$lib/libicudata.a" \
+  --icupkg "$icupkg" --skip "$icu/dl/keep-raw.txt" --level 15 \
   --cc "clang ${arch_flags[*]} -mmacosx-version-min=13.0" --obj-format macho
 zstd_include=$(pkg-config --variable=includedir libzstd)
 clang++ "${arch_flags[@]}" -mmacosx-version-min=13.0 -std=c++17 -O2 -c "$here/icu-decompress.cpp" \
