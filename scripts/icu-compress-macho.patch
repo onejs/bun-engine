@@ -1,0 +1,20 @@
+--- a/compress-data.ts
++++ b/compress-data.ts
+@@ -47 +47 @@
+-  die("usage: node compress-data.ts <in.dat> <out.a> [--skip file] [--icupkg path] [--level N] [--dict-size N] [--cc CC] [--ar AR] [--obj-format elf|coff]");
++  die("usage: node compress-data.ts <in.dat> <out.a> [--skip file] [--icupkg path] [--level N] [--dict-size N] [--cc CC] [--ar AR] [--obj-format elf|coff|macho]");
+@@ -57 +57 @@
+-if (OBJ_FORMAT !== "elf" && OBJ_FORMAT !== "coff") die(`--obj-format must be "elf" or "coff", got "${OBJ_FORMAT}"`);
++if (OBJ_FORMAT !== "elf" && OBJ_FORMAT !== "coff" && OBJ_FORMAT !== "macho") die(`--obj-format must be "elf" or "coff", got "${OBJ_FORMAT}"`);
+@@ -267 +267 @@
+-  const type = (sym: string): string[] => (coff ? [] : [`.type ${sym}, @object`]);
++  const type = (sym: string): string[] => (coff || OBJ_FORMAT === "macho" ? [] : [`.type ${sym}, @object`]);
+@@ -270 +270 @@
+-    section, ".balign 16",
++    OBJ_FORMAT === "macho" ? ".const" : section, ".balign 16",
+@@ -278 +278 @@
+-  ].join("\n"));
++  ].join("\n").replace(/\b(icudt[0-9]+_dat|bun_icu_zstd_dict(?:_size)?)\b/g, (name) => OBJ_FORMAT === "macho" ? "_" + name : name));
+@@ -304 +304 @@
+-  const keepRaw = (bare: string): boolean => skip.some((r) => r.test(bare));
++  const keepRaw = (bare: string): boolean => bare === names.at(-1) || skip.some((r) => r.test(bare));

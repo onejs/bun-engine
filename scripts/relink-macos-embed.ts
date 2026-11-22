@@ -94,8 +94,10 @@ const flags = [
   "-Wl,-headerpad,0x3478",
   "-Wl,-adhoc_codesign",
   "-lresolv",
+  "-framework",
+  "CoreFoundation",
 ];
-const icu = ["libicui18n.a", "libicuuc.a", "libicudata.a"].map((name) =>
+const icu = ["bun-icu-hook.o", "libicui18n.a", "libicuuc.a", "libicudata.a"].map((name) =>
   join(root, "icu-macos", name),
 );
 const lto = [
@@ -158,6 +160,7 @@ if (args.length === 0) {
     "-o",
     join(trim, "libbun.dylib"),
   ]);
+  run("bun", [join(import.meta.dirname, "trim-entry-points.ts"), root, build, llvm]);
   const objects = stage(trim, llvm, removed, join(trim, "strip"), arch);
   const native = (path: string) => {
     if (path.startsWith("--")) return true;

@@ -36,8 +36,6 @@ NodeQuic
 NodeHttp2
 NodeCluster
 Sql
-Sqlite
-SqliteExtensions
 Valkey
 S3Client
 S3Responses

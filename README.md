@@ -35,7 +35,7 @@ The runtime is Bun's macOS configuration, cross-built on Linux, then prelinked o
 
 Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux steps need `bun`, `cargo`, `ninja`, `cmake` and `BUN_TOOLCHAIN_LLVM` pointing at the LLVM release Bun pins (23.1.5 at this commit), which includes `ld64.lld`.
 
-1. `scripts/build-icu.sh` (Mac): static ICU 74.2 with unversioned names, the version WebKit compiled against. Its data leaves out converters, transliteration, spoof checking and stringprep, which the runtime links no code for. iOS apps may not link the system `libicucore` (ITMS 90338). Copy `icu/out/lib/libicu{i18n,uc,data}.a` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
+1. `scripts/build-icu.sh` (Mac): build static ICU 74.2 with unversioned names. Install Bun and the zstd CLI and development headers on the build Mac. The build uses the pinned WebKit per-item compressor. Its shared dictionary and compressed resources preserve every original ICU item. ICU loads frequently used items directly and decodes the others once, on first use. Copy `icu/out/lib/libicu{i18n,uc,data}.a` and `bun-icu-hook.o` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
 2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
 3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
 4. `scripts/relink-macos-embed.ts --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
@@ -77,9 +77,9 @@ before allocating and keep the lock while using borrowed typed-array storage.
 
 ## Removed features
 
-The runtime leaves out 81 of Bun's removable features, about 56 MB: compiling and tooling, which `bun compile` removes from every program anyway, and Bun and Node APIs a React Native app cannot reach because it never imports them and Hermes lacks them too (servers, databases, processes, sockets, the bundler and transpiler). `scripts/removed-features.txt` lists them. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` stay, since React Native's polyfills read every global they replace.
+The runtime leaves out the 79 features listed in `scripts/removed-features.txt`. Web globals such as `fetch`, `WebSocket`, `TextEncoder` and `URL` remain available, along with SQLite. Compiled context restart and the host heap collection API use the same embedding contract.
 
-Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `strip-features.ts` uses its analysis instead: Bun's trim link reports every feature's entry points, references to the removed ones are pointed at a trap, the compiled objects are linked natively with `-dead_strip`, and the feature state marks them removed so their guards take the removed path.
+Bun's `--trim` cuts code out of a linked image, which splits `__TEXT` into several executable segments that App Store validation rejects. `strip-features.ts` uses its analysis instead: The trim analysis recovers the exact entry points and their stub kinds. The native relink redirects references to removed entry points, runs `-dead_strip`, and records which feature guards should take the removed path.
 
 ## App Store
 
