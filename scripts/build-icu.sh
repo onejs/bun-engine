@@ -38,7 +38,9 @@ src="$icu/dl/icu/source"
 if [[ ! -d "$src" ]]; then
   tar -xzf "$icu/dl/icu4c-74_2-src.tgz" -C "$icu/dl"
   patch -d "$icu/dl/icu" -p1 < "$here/icu-udata.patch"
-  patch -d "$icu/dl/icu" -p1 < "$here/icu-system-timezone.patch"
+fi
+if ! git -C "$icu/dl/icu" apply --check --reverse "$here/icu-system-timezone.patch" 2>/dev/null; then
+  git -C "$icu/dl/icu" apply "$here/icu-system-timezone.patch"
 fi
 
 cd "$icu/build"
