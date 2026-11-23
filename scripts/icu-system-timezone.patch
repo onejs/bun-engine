@@ -1,0 +1,37 @@
+--- a/source/i18n/timezone.cpp
++++ b/source/i18n/timezone.cpp
+@@ -43,6 +43,11 @@
+ #include "unicode/ustring.h"
+ #include "uassert.h"
+ #include "ustr_imp.h"
++
++#if U_PLATFORM_IS_DARWIN_BASED
++#include <CoreFoundation/CFTimeZone.h>
++#include <cstdlib>
++#endif
+ 
+ #ifdef U_DEBUG_TZ
+ # include <stdio.h>
+@@ -456,6 +461,22 @@
+ TimeZone* U_EXPORT2
+ TimeZone::detectHostTimeZone()
+ {
++#if U_PLATFORM_IS_DARWIN_BASED
++    // Cocoa already tracks the system zone. The generic Unix path can scan
++    // the entire zoneinfo directory when localtime is a regular file.
++    if (!std::getenv("TZ")) {
++        if (CFTimeZoneRef system = CFTimeZoneCopySystem()) {
++            char name[256];
++            const bool named = CFStringGetCString(CFTimeZoneGetName(system), name, sizeof(name), kCFStringEncodingASCII);
++            CFRelease(system);
++            if (named) {
++                if (TimeZone* zone = createSystemTimeZone(UnicodeString(name, -1, US_INV)))
++                    return zone;
++            }
++        }
++    }
++#endif
++
+     // We access system timezone data through uprv_tzset(), uprv_tzname(), and others,
+     // which have platform specific implementations in putil.cpp
+     int32_t rawOffset = 0;
