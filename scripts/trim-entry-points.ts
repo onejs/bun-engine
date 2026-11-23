@@ -1,4 +1,4 @@
-import { readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { readdirSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { features } from './strip-features'
 
@@ -12,9 +12,9 @@ const { readBuiltinUses } = await import(join(source, 'builtin-uses.ts'))
 const { Demangler } = await import(join(source, 'report.ts'))
 const model = features(join(trim, 'features.json'))
 const uses = readBuiltinUses(join(build, 'codegen/builtin-uses.json'))
-const compiled = realpathSync(join(trim, 'trim-work/compiled'))
+const compiled = join(trim, 'trim-work/compiled')
 const reading = readMachOGraph(join(trim, 'libbun.dylib'), join(trim, 'libbun.map'),
-  readdirSync(compiled).map(name => join(compiled, name)), join(work, 'embed-macos/exports.txt'))
+  readdirSync(compiled).sort().map(name => join(compiled, name)), join(work, 'embed-macos/exports.txt'))
 if (reading.failures.length) throw new Error(JSON.stringify(reading.failures))
 const recorded = entries.readEntryPoints(reading, model, uses.namedByEngine)
 if (recorded.failures.length) throw new Error(JSON.stringify(recorded.failures))
