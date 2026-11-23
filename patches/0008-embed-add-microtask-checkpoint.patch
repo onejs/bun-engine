@@ -1,0 +1,37 @@
+diff --git a/src/runtime/bin_entry/embed.rs b/src/runtime/bin_entry/embed.rs
+index 36a5d2d..40dbe3e 100644
+--- a/src/runtime/bin_entry/embed.rs
++++ b/src/runtime/bin_entry/embed.rs
+@@ -31,11 +31,11 @@ fn jsc_vm(vm: &VirtualMachine) -> *mut c_void {
+ }
+ 
+ /// Drains microtasks, and on the JS thread runs bun's ready tasks too.
+-fn tick(vm: &VirtualMachine) {
++fn tick(vm: &VirtualMachine, run_ready_tasks: bool) {
+     let _lock = vm.global().vm().get_api_lock();
+     // ending the delay drains JSC's queue
+     unsafe { BunEmbed__undelayMicrotasks() };
+-    if JS_THREAD.get() == Some(&std::thread::current().id()) {
++    if run_ready_tasks && JS_THREAD.get() == Some(&std::thread::current().id()) {
+         let el = vm.event_loop();
+         el.tick_immediate_tasks();
+         el.promote_yield_tasks();
+@@ -167,7 +167,17 @@ pub(crate) unsafe extern "C" fn bun_embed_run_entry(exception: *mut *const c_voi
+ /// waits for.
+ #[unsafe(no_mangle)]
+ pub(crate) unsafe extern "C" fn bun_embed_tick() {
+-    tick(embedded().0);
++    tick(embedded().0, true);
++}
++
++/// Drains the JavaScriptCore microtask queue at a host callback boundary.
++///
++/// # Safety
++/// Call after create on the owning JavaScript thread.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn bun_embed_microtask_checkpoint() {
++    assert_eq!(JS_THREAD.get(), Some(&std::thread::current().id()));
++    tick(embedded().0, false);
+ }
+ 
+ /// Registers a coalesced readiness notification on Darwin's main queue.
