@@ -38,11 +38,12 @@ src="$icu/dl/icu/source"
 if [[ ! -d "$src" ]]; then
   tar -xzf "$icu/dl/icu4c-74_2-src.tgz" -C "$icu/dl"
   patch -d "$icu/dl/icu" -p1 < "$here/icu-udata.patch"
+  patch -d "$icu/dl/icu" -p1 < "$here/icu-system-timezone.patch"
 fi
 
 cd "$icu/build"
 flags="${arch_flags[*]} -mmacosx-version-min=13.0 -DU_DISABLE_RENAMING=1 -DU_STATIC_IMPLEMENTATION -O2"
-CFLAGS="$flags" CXXFLAGS="$flags -std=c++17" "$src/runConfigureICU" MacOSX \
+CFLAGS="$flags" CXXFLAGS="$flags -std=c++17" LDFLAGS="-framework CoreFoundation" "$src/runConfigureICU" MacOSX \
   --enable-static --disable-shared --with-data-packaging=static --disable-tests --disable-samples \
   --disable-extras --disable-icuio --disable-layoutex --prefix="$icu/out" > configure.log
 make -j"${BUN_ENGINE_JOBS:-4}" > make.log
