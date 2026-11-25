@@ -10,6 +10,8 @@ void bun_embed_destroy(void);
 
 int bun_embed_run_entry(JSValueRef* exception);
 void bun_embed_tick(void);
+/* drain JavaScriptCore microtasks on the JS thread without running ready tasks. */
+void bun_embed_microtask_checkpoint(void);
 /* host callbacks reenter the vm before allocating through the typed-array api. */
 void bun_embed_lock(JSContextRef context);
 void bun_embed_unlock(JSContextRef context);
