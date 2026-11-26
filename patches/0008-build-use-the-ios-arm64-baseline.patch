@@ -1,0 +1,16 @@
+diff --git a/scripts/build/flags.ts b/scripts/build/flags.ts
+index 36af7c760..81e2d6dd6 100644
+--- a/scripts/build/flags.ts
++++ b/scripts/build/flags.ts
+@@ -84,9 +84,9 @@ export interface Flag {
+
+ export const cpuTargetFlags: Flag[] = [
+   {
+-    flag: "-mcpu=apple-m1",
++    flag: `-mcpu=${process.env.BUN_ENGINE_DARWIN_ARM64_CPU ?? "apple-m1"}`,
+     when: c => c.darwin && c.arm64,
+-    desc: "Target Apple M1 (works on all Apple Silicon)",
++    desc: "Target the Bun Engine CPU or Apple M1",
+   },
+   {
+     flag: ["-march=armv8-a+crc", "-mtune=ampere1"],

@@ -1,0 +1,78 @@
+diff --git a/Source/JavaScriptCore/assembler/CPU.cpp b/Source/JavaScriptCore/assembler/CPU.cpp
+index 27853655..48fc5c42 100644
+--- a/Source/JavaScriptCore/assembler/CPU.cpp
++++ b/Source/JavaScriptCore/assembler/CPU.cpp
+@@ -192,5 +192,5 @@ int32_t hwNumberOfCores(CoreCategory category)
+ #endif // #if CPU(ARM64) && OS(DARWIN)
+
+-#if CPU(ARM64) && !(CPU(ARM64E) || OS(MACOS))
++#if CPU(ARM64) && !HAVE(LSE_INSTRUCTION)
+ bool isARM64_LSE()
+ {
+@@ -203,5 +203,5 @@ bool isARM64_LSE()
+ #endif
+
+-#if CPU(ARM64) && !OS(MACOS)
++#if CPU(ARM64) && !HAVE(SHA3_INSTRUCTION)
+ bool isARM64_SHA3()
+ {
+diff --git a/Source/JavaScriptCore/assembler/CPU.h b/Source/JavaScriptCore/assembler/CPU.h
+index 0829a580..6a469fe2 100644
+--- a/Source/JavaScriptCore/assembler/CPU.h
++++ b/Source/JavaScriptCore/assembler/CPU.h
+@@ -59,6 +59,5 @@ constexpr bool isARM64E_FPAC() { return false; }
+ #endif
+
+-#if CPU(ARM64E) || OS(MACOS)
+-// ARM64E or all macOS ARM64 CPUs have LSE.
++#if HAVE(LSE_INSTRUCTION)
+ constexpr bool isARM64_LSE() { return true; }
+ #else
+@@ -66,6 +65,5 @@ JS_EXPORT_PRIVATE bool isARM64_LSE();
+ #endif
+
+-#if OS(MACOS)
+-// All macOS ARM64 CPUs have SHA3, but ARM64E does not mean SHA3 feature is enabled since A12 chip does not have that.
++#if HAVE(SHA3_INSTRUCTION)
+ constexpr bool isARM64_SHA3() { return true; }
+ #else
+diff --git a/Source/JavaScriptCore/assembler/CPUFeatureSet.h b/Source/JavaScriptCore/assembler/CPUFeatureSet.h
+index 676c94e9..3b8372cd 100644
+--- a/Source/JavaScriptCore/assembler/CPUFeatureSet.h
++++ b/Source/JavaScriptCore/assembler/CPUFeatureSet.h
+@@ -104,6 +104,5 @@
+ #endif
+
+-// Every ARM64 CPU that runs macOS has FRINT and SHA3.
+-#if HAVE(FRINT_INSTRUCTION) || OS(MACOS)
++#if HAVE(FRINT_INSTRUCTION)
+ #define JSC_BUILD_TARGET_HAS_FRINT 1
+ #else
+@@ -111,5 +110,5 @@
+ #endif
+
+-#if HAVE(SHA3_INSTRUCTION) || OS(MACOS)
++#if HAVE(SHA3_INSTRUCTION)
+ #define JSC_BUILD_TARGET_HAS_SHA3 1
+ #else
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index f42e46b0..b3fafbbf 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -266,13 +266,13 @@
+ #define HAVE_COMPUTED_GOTO 1
+
+-#if (CPU(ARM64E) && OS(DARWIN)) || (CPU(ARM64) && OS(MACOS)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_JCVT) && __ARM_FEATURE_JCVT)
++#if (CPU(ARM64E) && OS(DARWIN)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_JCVT) && __ARM_FEATURE_JCVT)
+ #define HAVE_FJCVTZS_INSTRUCTION 1
+ #endif
+
+-#if (CPU(ARM64E) && OS(DARWIN)) || (CPU(ARM64) && OS(MACOS)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_ATOMICS) && __ARM_FEATURE_ATOMICS)
++#if (CPU(ARM64E) && OS(DARWIN)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_ATOMICS) && __ARM_FEATURE_ATOMICS)
+ #define HAVE_LSE_INSTRUCTION 1
+ #endif
+
+-#if (CPU(ARM64E) && OS(DARWIN)) || (CPU(ARM64) && OS(MACOS)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_FP16_SCALAR_ARITHMETIC) && __ARM_FEATURE_FP16_SCALAR_ARITHMETIC)
++#if (CPU(ARM64E) && OS(DARWIN)) || (COMPILER(CLANG) && defined(__ARM_FEATURE_FP16_SCALAR_ARITHMETIC) && __ARM_FEATURE_FP16_SCALAR_ARITHMETIC)
+ #define HAVE_FLOAT16_INSTRUCTION 1
+ #endif

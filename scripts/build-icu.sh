@@ -6,7 +6,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 icu="$work/icu"
 arch=${BUN_ENGINE_ARCH:-arm64}
 case "$arch" in
-  arm64) arch_flags=(-arch arm64) ;;
+  arm64)
+    source "$here/darwin-arm64-cpu.sh"
+    arch_flags=(-arch arm64 "-mcpu=$BUN_ENGINE_DARWIN_ARM64_CPU")
+    ;;
   x86_64) arch_flags=(-arch arm64 -arch x86_64) ;;
   *) exit 2 ;;
 esac

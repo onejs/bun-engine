@@ -34,20 +34,21 @@ const ninja = readFileSync(join(build, "build.ninja"), "utf8").replaceAll(
   "$\n",
   "",
 );
-const link = ninja
-  .split("\n")
-  .find((line) => line.startsWith("build bun-profile |"));
+const link = ninja.match(/^(build bun-profile \|.*)\n  ldflags = .*\n  lazy = *(?:-Wl,@(.+))?$/m);
 if (!link) throw new Error("missing runtime link");
-const inputs = link
+const [, edge, lazyResponseFile] = link;
+const inputs = edge
   .split(/:\s+link\s+/)[1]
   .split(/\s+\|\|?\s+/)[0]
   .trim()
   .split(/\s+/)
   .map((path) => resolve(build, path));
-const lazy = readFileSync(join(build, "bun-profile.lazy.rsp"), "utf8")
-  .trim()
-  .split(/\s+/)
-  .map((path) => (path.startsWith("--") ? path : resolve(build, path)));
+const lazy = lazyResponseFile
+  ? readFileSync(join(build, lazyResponseFile), "utf8")
+      .trim()
+      .split(/\s+/)
+      .map((path) => (path.startsWith("--") ? path : resolve(build, path)))
+  : [];
 writeFileSync(join(out, "inputs.rsp"), inputs.join("\n"));
 writeFileSync(join(out, "lazy.rsp"), lazy.join("\n"));
 const toolchain = process.env.BUN_TOOLCHAIN_LLVM;
@@ -182,7 +183,7 @@ if (args.length === 0) {
   );
   writeFileSync(
     join(trim, "native-lazy.rsp"),
-    lazy.filter(native).join("\n") + "\n",
+    lazy.filter(native).map((path) => path + "\n").join(""),
   );
   run(join(llvm, "clang++"), [
     "@" + join(trim, "native.rsp"),

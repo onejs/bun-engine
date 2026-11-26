@@ -31,16 +31,16 @@ One compiles device programs with `--aot-huge-heap`, whose references reach any 
 
 ## Building
 
-The runtime is Bun's macOS configuration, cross-built on Linux, then prelinked on a Mac into one object that exports the embed calls and the JavaScriptCore C API, retagged for iOS. Keeping the macOS configuration keeps the runtime facts equal to the macOS compiler's, so the Mac's `bun compile` produces images the iOS runtime loads.
+The iOS runtime uses Bun’s macOS configuration so the compiler and the embedded runtime agree on JavaScriptCore layout. The arm64 build sets the Apple A10 CPU baseline, the oldest device supported by iPadOS 18. Bun, JavaScriptCore, ICU and the ahead-of-time programs share that baseline.
 
-Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). The Linux steps need `bun`, `cargo`, `ninja`, `cmake` and `BUN_TOOLCHAIN_LLVM` pointing at the LLVM release Bun pins (23.1.5 at this commit), which includes `ld64.lld`.
+Every script reads `BUN_ENGINE_WORK` (default `~/.cache/bun-engine`). Build the arm64 runtime and compiler on a Mac with Xcode, Bun, Cargo, Ninja, CMake and the zstd CLI and development headers. Set `BUN_TOOLCHAIN_LLVM` to the LLVM release Bun pins (23.1.5 at this commit), which includes `ld64.lld`.
 
-1. `scripts/build-icu.sh` (Mac): build static ICU 74.2 with unversioned names. Install Bun and the zstd CLI and development headers on the build Mac. The build uses the pinned WebKit per-item compressor. Its shared dictionary and compressed resources preserve every original ICU item. ICU loads frequently used items directly and decodes the others once, on first use. Copy `icu/out/lib/libicu{i18n,uc,data}.a` and `bun-icu-hook.o` to `$BUN_ENGINE_WORK/icu-macos/` on the Linux host.
-2. `scripts/setup.sh` (Linux): clones Bun at `BUN_COMMIT` and applies `patches/`.
-3. `scripts/bun-darwin-build.sh` (Linux): cross-builds Bun for macOS arm64. Its `build/darwin-release/bun` is the compiler.
-4. `scripts/relink-macos-embed.ts --remove scripts/removed-features.txt` (Linux): links `embed-macos/libbun.dylib`, the macOS runtime, without the features React Native cannot reach (below). Without `--remove` it links every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
-5. `scripts/stage-inputs.sh` (Linux): stages the native objects of step 4's link, without debug info, in `$BUN_ENGINE_WORK/stage.tar.zst`. Copy it to the Mac and unpack it.
-6. `scripts/package.sh <stage> <bun> <version> [x86_64-stage x86_64-bun]` (Mac): runs `make-static.sh` and writes the release tarball.
+1. `scripts/build-icu.sh` builds static ICU 74.2 with unversioned names and the pinned WebKit per-item compressor. Copy `icu/out/lib/libicu{i18n,uc,data}.a` and `bun-icu-hook.o` to `$BUN_ENGINE_WORK/icu-macos/`.
+2. `scripts/setup.sh` checks out the pinned Bun and WebKit source and applies the embed and CPU baseline patches.
+3. `scripts/bun-darwin-build.sh` builds Bun and JavaScriptCore. Its `build/darwin-release/bun` is the compiler.
+4. `scripts/relink-macos-embed.ts --remove scripts/removed-features.txt` links `embed-macos/libbun.dylib` with the features that React Native cannot reach removed. Set `MACOS_SDK` to the path from `xcrun --sdk macosx --show-sdk-path`. Omit `--remove` to link every feature. `scripts/rebuild-runtime.sh` rebuilds the embed bindings and relinks after a patch change.
+5. `scripts/stage-inputs.sh` stages the native objects from that link in `$BUN_ENGINE_WORK/stage/` and writes `stage.tar.zst` for packaging on another Mac.
+6. `scripts/package.sh <stage> <bun> <version> [x86_64-stage x86_64-bun]` runs `make-static.sh` and writes the release tarball.
 
 `make-static.sh` prelinks the staged objects with Apple's `ld -r` (LLVM's `ld64.lld` has no `-r`) into one object exporting only the embed calls and the JavaScriptCore C API. Every other symbol becomes local, so the runtime's own WebKit, ICU and Rust symbols cannot collide with the app's. `subsections.ts` marks data-only objects splittable first, since `ld -r` keeps `MH_SUBSECTIONS_VIA_SYMBOLS`, which dead stripping needs, only when every input has it. `finish-object.ts` marks the removed features and retags the object for iOS, and `ios-compat.c` fills the iOS SDK's gaps inside it. `exports-tbd.py` writes the stub debug builds link weakly.
 
